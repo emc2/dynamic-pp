@@ -195,18 +195,9 @@ data Doc =
     -- | A single character.  Cannot be a newline
     Char { charContent :: !Char }
     -- | A ByteString.
-  | Bytestring {
-      -- | The length of the text
-      bsLength :: !Int,
-      -- | The content of the text
-      bsContent :: !Strict.ByteString
-    }
-    -- | A Lazy ByteString
-  | LazyBytestring {
-      -- | The length of the text
-      lbsLength :: !Int,
-      -- | The content of the text
-      lbsContent :: !Lazy.ByteString
+  | Builder {
+      builderLength :: !Int,
+      builderContent :: !Builder
     }
     -- | A line.
   | Line {
@@ -366,26 +357,22 @@ char chr = Char { charContent = chr }
 
 -- | Create a 'Doc' containing a string.
 string :: String -> Doc
-string str =
-  let
-    len = length str
-    bstr = Strict.UTF8.fromString str
-  in
-    Bytestring { bsLength = len, bsContent = bstr }
+string str = Builder { builderContent = fromString str,
+                       builderLength = length str }
 
 -- | Create a 'Doc' containing a bytestring.
 bytestring :: Strict.ByteString -> Doc
 bytestring txt
   | Strict.null txt = empty
-  | otherwise = Bytestring { bsLength = Strict.UTF8.length txt,
-                             bsContent = txt }
+  | otherwise = Builder { builderLength = Strict.UTF8.length txt,
+                          builderContent = fromByteString txt }
 
 -- | Create a 'Doc' containing a lazy bytestring
 lazyBytestring :: Lazy.ByteString -> Doc
 lazyBytestring txt
   | Lazy.null txt = empty
-  | otherwise = LazyBytestring { lbsLength = Lazy.UTF8.length txt,
-                                 lbsContent = txt }
+  | otherwise = Builder { builderLength = Lazy.UTF8.length txt,
+                          builderContent = fromLazyByteString txt }
 
 -- | The character @(@
 lparen :: Doc
@@ -916,8 +903,7 @@ group doc = Choose { chooseOptions = [ doc, flatten doc ] }
 
 buildOneLine :: Doc -> Builder
 buildOneLine Char { charContent = chr } = fromChar chr
-buildOneLine Bytestring { bsContent = txt } = fromByteString txt
-buildOneLine LazyBytestring { lbsContent = txt } = fromLazyByteString txt
+buildOneLine Builder { builderContent = builder } = builder
 buildOneLine Line { insertSpace = True } = fromChar ' '
 buildOneLine Line { insertSpace = False } = mempty
 buildOneLine Cat { catDocs = docs } = mconcat (map buildOneLine docs)
@@ -933,8 +919,7 @@ renderOneLine = toLazyByteString . buildOneLine
 
 buildFast :: Doc -> Builder
 buildFast Char { charContent = chr } = fromChar chr
-buildFast Bytestring { bsContent = txt } = fromByteString txt
-buildFast LazyBytestring { lbsContent = txt } = fromLazyByteString txt
+buildFast Builder { builderContent = builder } = builder
 buildFast Line {} = fromChar '\n'
 buildFast Cat { catDocs = docs } = mconcat (map buildFast docs)
 buildFast Nest { nestDoc = inner } = buildFast inner
@@ -1180,7 +1165,8 @@ mergeResults s1 @ Single { singleRender = r1 @ Render { renderLines = lines1 },
              s2 @ Single { singleRender = r2 @ Render { renderLines = lines2 },
                            singleUpper = upper2,
                            singleCol = col2 }
-  | upper1 == upper2 && col1 == col2 = if lines1 < lines2 then s1 else s2
+  | upper1 == upper2 && col1 == col2 =
+    if lines1 < lines2 then s1 else s2
   | otherwise =
     Multi { multiOptions = HashMap.fromList [(Offsets { offsetUpper = upper1,
                                                         offsetCol = col1 },
@@ -1231,10 +1217,10 @@ buildOptimal maxcol ansiterm doc =
           singleCol = Relative 1,
           singleUpper = maxcol - 1
         }
-    buildDynamic _ _ ind Bytestring { bsContent = txt, bsLength = len } =
+    buildDynamic _ _ ind Builder { builderContent = txt, builderLength = len } =
       let
         overrun = if maxcol >= len then Relative 0 else Relative (len - maxcol)
-        builder = contentBuilder ind (fromByteString txt)
+        builder = contentBuilder ind txt
       in
        Single {
          singleRender =
@@ -1243,18 +1229,6 @@ buildOptimal maxcol ansiterm doc =
          singleCol = Relative len,
          singleUpper = maxcol - len
        }
-    buildDynamic _ _ ind LazyBytestring { lbsContent = txt, lbsLength = len } =
-      let
-        overrun = if maxcol >= len then Relative 0 else Relative (len - maxcol)
-        builder = contentBuilder ind (fromLazyByteString txt)
-      in
-        Single {
-          singleRender =
-             Render { renderLines = 0, renderOverrun = overrun,
-                      renderBuilder = builder, renderIndent = None },
-          singleCol = Relative len,
-          singleUpper = maxcol - len
-        }
     buildDynamic _ nesting _ Line {} =
       Single {
         singleRender =

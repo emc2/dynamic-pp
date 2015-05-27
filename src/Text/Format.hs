@@ -160,13 +160,14 @@ module Text.Format(
        group,
 
        -- * Rendering @Doc@s
-       buildOneLine,
        renderOneLine,
-       buildFast,
+       buildOneLine,
+       putOneLine,
        renderFast,
+       buildFast,
        putFast,
-       buildOptimal,
        renderOptimal,
+       buildOptimal,
        putOptimal
        ) where
 
@@ -882,6 +883,7 @@ encloseSep left right _ [doc] = left <> doc <> right
 encloseSep left right middle docs =
   left <> align (punctuate middle docs) <> right
 
+-- | Render a list, enclosed in brackets and separated by commas.
 list :: [Doc] -> Doc
 list = group . encloseSep lbrack rbrack (comma <> line)
 
@@ -901,6 +903,7 @@ flatten doc = doc
 group :: Doc -> Doc
 group doc = Choose { chooseOptions = [ doc, flatten doc ] }
 
+-- | Produce a 'Builder' that renders the 'Doc' to one line.
 buildOneLine :: Doc -> Builder
 buildOneLine Char { charContent = chr } = fromChar chr
 buildOneLine Builder { builderContent = builder } = builder
@@ -912,11 +915,18 @@ buildOneLine Choose { chooseOptions = first : _ } = buildOneLine first
 buildOneLine Choose {} = error "Choose with no options"
 buildOneLine Graphics { graphicsDoc = inner } = buildOneLine inner
 
--- | Render the entire document to one line.  Good for output that
+-- | Render the entire 'Doc' to one line.  Good for output that
 -- will be read only by a machine, where newlines are not important at all
 renderOneLine :: Doc -> Lazy.ByteString
 renderOneLine = toLazyByteString . buildOneLine
 
+-- | Output the entire 'Doc', as rendered by 'renderOneLine' to the
+-- given 'Handle'.
+putOneLine :: Handle -> Doc -> IO ()
+putOneLine handle =
+  toByteStringIO (Strict.hPut handle) . buildOneLine
+
+-- | Produce a 'Builder' that renders the 'Doc' quickly.
 buildFast :: Doc -> Builder
 buildFast Char { charContent = chr } = fromChar chr
 buildFast Builder { builderContent = builder } = builder
@@ -927,13 +937,13 @@ buildFast Choose { chooseOptions = first : _ } = buildFast first
 buildFast Choose {} = error "Choose with no options"
 buildFast Graphics { graphicsDoc = inner } = buildFast inner
 
--- | Render the entire document, preserving newlines, but without any
+-- | Render the entire 'Doc', preserving newlines, but without any
 -- indentation.  Good for output that will be read only by machine,
 -- but where newlines matter.
 renderFast :: Doc -> Lazy.ByteString
 renderFast = toLazyByteString . buildFast
 
--- | Output the entire document, as rendered by renderFast to the
+-- | Output the entire 'Doc', as rendered by 'renderFast' to the
 -- given 'Handle'.
 putFast :: Handle -> Doc -> IO ()
 putFast handle =
@@ -1196,6 +1206,8 @@ contentBuilder Partial builder nesting col =
     else builder
 contentBuilder None builder _ _ = builder
 
+-- | Produce a 'Builder' that renders the 'Doc' using the optimal
+-- layout engine.
 buildOptimal :: Int
              -- ^ The maximum number of columns.
              -> Bool
@@ -1377,6 +1389,8 @@ renderOptimal :: Int
               -> Lazy.ByteString
 renderOptimal cols color = toLazyByteString . buildOptimal cols color
 
+-- | Output the entire 'Doc', as rendered by 'renderOptimal' to the
+-- given 'Handle'.
 putOptimal :: Handle
            -- ^ The 'Handle' to which to write output
            -> Int

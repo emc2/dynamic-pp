@@ -117,7 +117,7 @@ renderOptimalTests = [
                              align (line <> nest 2 (line <> string "hello"))),
     "multiline_break" ~: Lazy.fromString "aaaaa\nbbbbc\ndddee\nfghij" @=?
       renderOptimal 5 False (string "aaaaa" <//> string "bbbb" <//>
-                             char 'c' <//> string "ddd" <//> string "ee" <>
+                             char 'c' <//> string "ddd" <//> string "ee" <//>
                              char 'f' <//> char 'g' <//> char 'h' <//>
                              char 'i' <//> char 'j')
   ]

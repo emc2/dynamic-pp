@@ -966,6 +966,7 @@ data Column =
       maxFixed :: !Int,
       maxRelative :: !Int
     }
+    deriving Show
 
 -- | The indent required.
 data Indent =
@@ -1108,8 +1109,7 @@ packResult :: HashMap Offsets Render -> Result
 packResult opts =
   case HashMap.toList opts of
     [(Offsets { offsetUpper = upper, offsetCol = col }, render)] ->
-      Single { singleCol = col, singleUpper = upper,
-               singleRender = render }
+      Single { singleCol = col, singleUpper = upper, singleRender = render }
     _ -> Multi { multiOptions = opts }
 
 bestRenderInOpts :: HashMap Offsets Render -> Render
@@ -1134,17 +1134,20 @@ appendOne (upper1, col1, Render { renderBuilder = build1,
                                   renderOverrun = overrun2,
                                   renderIndent = ind }) =
   let
-    (newupper, newbuild) = case col1 of
+    newbuild = case col1 of
       Fixed { fixedOffset = n } ->
-        (upper1, \nesting col -> build1 nesting col `mappend` build2 nesting n)
+        \nesting col -> build1 nesting col `mappend` build2 nesting n
       Relative { relOffset = n } ->
-        (min upper1 (upper2 - n),
-         \nesting col -> build1 nesting col `mappend`
-                         (build2 nesting $! col + n))
+        \nesting col -> build1 nesting col `mappend` (build2 nesting $! col + n)
       Maximum { maxRelative = rel, maxFixed = fixed } ->
-        (min upper1 (upper2 - rel),
-         \nesting col -> build1 nesting col `mappend`
-                         build2 nesting (max fixed (col + rel)))
+        \nesting col -> build1 nesting col `mappend`
+                        build2 nesting (max fixed (col + rel))
+
+    newupper = case (col1, col2) of
+      (_, Fixed {}) -> min upper1 upper2
+      (Fixed { fixedOffset = n }, _) -> min upper1 (upper2 - n)
+      (Relative { relOffset = n }, _) -> min upper1 (upper2 - n)
+      (Maximum { maxRelative = rel }, _) -> min upper1 (upper2 - rel)
 
     newoverrun =
       if newupper < 0
@@ -1160,20 +1163,19 @@ appendOne (upper1, col1, Render { renderBuilder = build1,
 -- | Combine two results into an option
 mergeResults :: Result -> Result -> Result
 mergeResults s1 @ Single { singleRender = r1 @ Render { renderLines = lines1 },
-                           singleUpper = upper1,
-                           singleCol = col1 }
+                           singleUpper = upper1, singleCol = col1 }
              s2 @ Single { singleRender = r2 @ Render { renderLines = lines2 },
-                           singleUpper = upper2,
-                           singleCol = col2 }
+                           singleUpper = upper2, singleCol = col2 }
   | upper1 == upper2 && col1 == col2 =
     if lines1 < lines2 then s1 else s2
   | otherwise =
-    Multi { multiOptions = HashMap.fromList [(Offsets { offsetUpper = upper1,
-                                                        offsetCol = col1 },
-                                              r1),
-                                             (Offsets { offsetUpper = upper2,
-                                                        offsetCol = col2 },
-                                              r2)] }
+    Multi { multiOptions =
+               HashMap.fromList [(Offsets { offsetUpper = upper1,
+                                            offsetCol = col1 },
+                                  r1),
+                                 (Offsets { offsetUpper = upper2,
+                                            offsetCol = col2 },
+                                  r2)] }
 mergeResults Single { singleRender = render, singleUpper = upper,
                       singleCol = col }
              Multi { multiOptions = opts } =
@@ -1214,8 +1216,7 @@ buildOptimal maxcol ansiterm doc =
           singleRender =
              Render { renderLines = 0, renderOverrun = overrun,
                       renderBuilder = builder, renderIndent = None },
-          singleCol = Relative 1,
-          singleUpper = maxcol - 1
+          singleCol = Relative 1, singleUpper = maxcol - 1
         }
     buildDynamic _ _ ind Builder { builderContent = txt, builderLength = len } =
       let
@@ -1223,29 +1224,24 @@ buildOptimal maxcol ansiterm doc =
         builder = contentBuilder ind txt
       in
        Single {
-         singleRender =
-             Render { renderLines = 0, renderOverrun = overrun,
-                      renderBuilder = builder, renderIndent = None },
-         singleCol = Relative len,
-         singleUpper = maxcol - len
+         singleRender = Render { renderLines = 0, renderOverrun = overrun,
+                                 renderBuilder = builder, renderIndent = None },
+         singleCol = Relative len, singleUpper = maxcol - len
        }
     buildDynamic _ nesting _ Line {} =
       Single {
-        singleRender =
-           Render { renderOverrun = Fixed { fixedOffset = 0 },
-                    renderIndent = Full, renderLines = 1,
-                    renderBuilder = const $! const $! fromChar '\n' },
-        singleCol = nesting,
-        singleUpper = maxcol
+        singleRender = Render { renderOverrun = Fixed { fixedOffset = 0 },
+                                renderIndent = Full, renderLines = 1,
+                                renderBuilder = const $! const $!
+                                                fromChar '\n' },
+        singleCol = nesting, singleUpper = maxcol
       }
     buildDynamic _ _ ind Cat { catDocs = [] } =
       Single {
-        singleRender =
-           Render { renderOverrun = Fixed { fixedOffset = 0 },
-                    renderIndent = ind, renderLines = 0,
-                    renderBuilder = const mempty },
-        singleCol = Relative { relOffset = 0 },
-        singleUpper = maxcol
+        singleRender = Render { renderOverrun = Fixed { fixedOffset = 0 },
+                                renderIndent = ind, renderLines = 0,
+                                renderBuilder = const mempty },
+        singleCol = Relative { relOffset = 0 }, singleUpper = maxcol
       }
     buildDynamic sgr nesting ind Cat { catDocs = first : rest } =
       let

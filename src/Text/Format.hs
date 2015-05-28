@@ -192,20 +192,28 @@ import qualified Data.ByteString.Lazy.UTF8 as Lazy.UTF8
 import qualified Data.HashMap.Strict as HashMap
 
 -- | Datatype representing a formatted document.
+
+-- Docs are organized into a tree structure whose nodes dictate the
+-- formatting of the generated text.  These are rendered by the
+-- various rendering engines into a Builder (from the blaze-builder
+-- library).
 data Doc =
-    -- | A single character.  Cannot be a newline
+    -- | A single character.  Cannot be a newline.
     Char { charContent :: !Char }
-    -- | A ByteString.
+    -- | A raw Builder that constructs a string containing no
+    -- newlines.  This is used to represent basic text.
   | Builder {
+      -- | Length of the text that gets built.
       builderLength :: !Int,
+      -- | A Builder that constructs the text.
       builderContent :: !Builder
     }
-    -- | A line.
+    -- | A newline.
   | Line {
       -- | Whether to insert a space when undone by a group.
       insertSpace :: !Bool
     }
-    -- | Concatenated documents.
+    -- | Concatenated documents.  An empty list here represents an empty @Doc@.
   | Cat {
       catDocs :: [Doc]
     }
@@ -221,12 +229,12 @@ data Doc =
       -- | Document whose nesting should be increased.
       nestDoc :: Doc
     }
-    -- | Choose the best from among a list of options.
+    -- | Choose the \"best\" from among a list of options.
   | Choose {
       -- | The list of options.
       chooseOptions :: [Doc]
     }
-    -- | Set graphics mode options when rendering this doc.
+    -- | Set graphics mode options when rendering the child @Doc@.
   | Graphics {
       -- | Graphics mode to set.
       graphicsSGR :: !Graphics,
@@ -447,8 +455,7 @@ space = char ' '
 equals :: Doc
 equals = char '='
 
--- | Increase the indentation level of a document by some amount at
--- the next newline.
+-- | Increase the indentation level of a document by some amount.
 nest :: Int -> Doc -> Doc
 nest _ c @ Cat { catDocs = [] } = c
 nest lvl n @ Nest { nestLevel = lvl' } = n { nestLevel = lvl + lvl' }
@@ -950,6 +957,11 @@ putFast handle =
   toByteStringIO (Strict.hPut handle) . buildFast
 
 -- | A rendering of a document.
+
+-- Renderings store three basic things: A notion of the "badness" of
+-- this particular rendering (represented by the overrun and the
+-- number of lines), the indentation mode for the next document, and a
+-- function that actually produces the Builder.
 data Render =
   Render {
     -- | The number of lines in the document.
@@ -958,13 +970,16 @@ data Render =
     renderOverrun :: !Column,
     -- | A builder that constructs the document.
     renderBuilder :: !(Int -> Int -> Builder),
-    -- | Whether or not to add indentation on the next non-empty
-    -- document.
+    -- | Indentation mode for the next document.
     renderIndent :: !Indent
   }
 
 -- | Column data type.  Represents how rendered documents affect the
 -- current column.
+
+-- Columns can be fixed, relative, or the maximum of the two.  Fixed
+-- means "this colucm exactly".  Relative means "some starting point
+-- plus this number".
 data Column =
     -- | An absolute column offset.
     Fixed { fixedOffset :: !Int }
@@ -973,12 +988,14 @@ data Column =
     -- | The greater of a relative column offset and an absolute
     -- column offset.
   | Maximum {
-      maxFixed :: !Int,
-      maxRelative :: !Int
+      -- | This many columns offset from a relative point.
+      maxRelative :: !Int,
+      -- | But not less than this value.
+      maxFixed :: !Int
     }
     deriving Show
 
--- | The indent required.
+-- | The indentation mode.
 data Indent =
     -- | Indent starting with the zero column.
     Full
@@ -1048,26 +1065,47 @@ instance Eq Column where
 -- | Given a starting column and an ending column, give a column
 -- representing the combination of the two.
 advance :: Column -> Column -> Column
+-- If the second column is fixed, it doesn't matter what the first is.
 advance _ f @ Fixed {} = f
+-- If the first is fixed and the second is relative, then advance the
+-- first by the relative offset.
 advance Fixed { fixedOffset = start } Relative { relOffset = n } =
   Fixed { fixedOffset = start + n }
+-- If the first is fixed and the second is a maximum, then we can
+-- figure out which is the larger.
 advance Fixed { fixedOffset = start }
         Maximum { maxFixed = fixed, maxRelative = rel } =
   Fixed { fixedOffset = max fixed (start + rel) }
+-- If both are relative, just add them and make a new relative.
 advance Relative { relOffset = start } Relative { relOffset = n } =
   Relative { relOffset = start + n }
+-- If we combine a relative and a maximum, then add the relative
+-- offset to the relative portion of the maximum
 advance Relative { relOffset = start } m @ Maximum { maxRelative = n } =
   m { maxRelative = start + n }
 advance m @ Maximum { maxRelative = rel } Relative { relOffset = n } =
   m { maxRelative = rel + n }
+-- If both are a maximum, then the resulting relative portion is the
+-- sum of the two relative portions.  The resulting fixed portion is
+-- the greater of the second fixed portion, or the first fixed portion
+-- plus the second relative portion.
 advance Maximum { maxFixed = fixed1, maxRelative = rel1 }
         Maximum { maxFixed = fixed2, maxRelative = rel2 } =
   Maximum { maxFixed = max fixed2 (fixed1 + rel2), maxRelative = rel1 + rel2 }
 
--- | Index used in the hash table.
+-- | Offsets structure.  this is used as a key in a hash table.  It is
+-- also important to how the algorithm works.  Renderings represent
+-- "chunks", which have an ending column and a maximum column.  The
+-- algorithm glues these chunks together, then evaluates their
+-- "badness" using the 'advance' function to recalculate the ending
+-- column and the maximum starting offset.
 data Offsets =
   Offsets {
+    -- | Upper-bound: Highest starting column for this document
+    -- without causing overrun.  If this is negative, it means you've
+    -- overrun by that much.
     offsetUpper :: !Int,
+    -- | Ending column.
     offsetCol :: !Column
   }
   deriving Eq
@@ -1078,12 +1116,15 @@ instance Hashable Offsets where
 
 -- | A result.  This is split into 'Single' and 'Multi' in order to
 -- optimize for the common case of a single possible rendering.
+-- Otherwise, it would be perfectly fine to represent everything as a
+-- HashMap.
 data Result =
     -- | A single possible rendering.
     Single {
       -- | The rendered document.
       singleRender :: !Render,
       -- | The first column at which this render causes an overrun.
+      -- Same as 'offsetUpper'.
       singleUpper :: !Int,
       -- | The current column at the end of rendering.
       singleCol :: !Column
@@ -1097,16 +1138,21 @@ data Result =
       multiOptions :: !(HashMap Offsets Render)
     }
 
+-- | Generate n spaces
 makespaces :: Int -> Builder
 makespaces n = fromLazyByteString (Lazy.Char8.replicate (fromIntegral n) ' ')
 
+-- | Pick the best rendering of two.
 bestRender :: Render -> Render -> Render
 bestRender r1 @ Render { renderLines = lines1, renderOverrun = overrun1 }
            r2 @ Render { renderLines = lines2, renderOverrun = overrun2 }
+    -- If one overruns less than the other, pick that one.
   | overrun1 < overrun2 = r1
   | overrun1 > overrun2 = r2
+    -- Otherwise, pick the shortest one.
   | otherwise = if lines1 < lines2 then r1 else r2
 
+-- Add a result into the HashMap
 insertRender :: Int -> Column -> Render -> HashMap Offsets Render ->
                 HashMap Offsets Render
 insertRender upper col render =
@@ -1115,6 +1161,8 @@ insertRender upper col render =
   in
     HashMap.insertWith bestRender offsets render
 
+-- If a result only has one possibility, convert it to a Single.
+-- Otherwise, leave it.
 packResult :: HashMap Offsets Render -> Result
 packResult opts =
   case HashMap.toList opts of
@@ -1122,18 +1170,25 @@ packResult opts =
       Single { singleCol = col, singleUpper = upper, singleRender = render }
     _ -> Multi { multiOptions = opts }
 
+-- Pick the best result out of a set of results.  Used at the end to
+-- pick the final result.
 bestRenderInOpts :: HashMap Offsets Render -> Render
 bestRenderInOpts =
   let
     -- | Compare two Renders.  Less than means better.
     compareRenders Render { renderLines = lines1, renderOverrun = overrun1 }
                    Render { renderLines = lines2, renderOverrun = overrun2 } =
+      -- This is the same logic as bestRender
       case compare overrun1 overrun2 of
         EQ -> compare lines1 lines2
         out -> out
   in
     minimumBy compareRenders . HashMap.elems
 
+-- | Append operation on complete states.  A complete state is the
+-- contents of an Offset and a Render (ie. the contents of Single, or
+-- the contents of an entry in a Multi combined with the corresponding
+-- key).
 appendOne :: (Int, Column, Render) -> (Int, Column, Render) ->
              (Int, Column, Render)
 appendOne (upper1, col1, Render { renderBuilder = build1,
@@ -1144,40 +1199,82 @@ appendOne (upper1, col1, Render { renderBuilder = build1,
                                   renderOverrun = overrun2,
                                   renderIndent = ind }) =
   let
+    -- The new build is completely determined by the first render's
+    -- starting column.
     newbuild = case col1 of
+      -- If the first ending column is fixed, then start the second
+      -- builder at that column.
       Fixed { fixedOffset = n } ->
         \nesting col -> build1 nesting col `mappend` build2 nesting n
+      -- If the first ending column is relative, then advance the
+      -- column by that much and start the second builder at that
+      -- column.
       Relative { relOffset = n } ->
         \nesting col -> build1 nesting col `mappend` (build2 nesting $! col + n)
+      -- If the ending column is a maximum
       Maximum { maxRelative = rel, maxFixed = fixed } ->
         \nesting col -> build1 nesting col `mappend`
                         build2 nesting (max fixed (col + rel))
 
+    -- The new upper-bound is determined by both ending columns.
+    --
+    -- IMPORTANT: In this logic, a negative upper-bound means you
+    -- overrun by that much.  This is critical to the functioning of
+    -- this logic.
     newupper = case (col1, col2) of
+      -- If the second column is fixed, then the upper-bound is the
+      -- minimum of the two upper-bounds.
       (_, Fixed {}) -> min upper1 upper2
+      -- Otherwise, we decrement the second upper-bound and take the
+      -- minimum with the first.
       (Fixed { fixedOffset = n }, _) -> min upper1 (upper2 - n)
       (Relative { relOffset = n }, _) -> min upper1 (upper2 - n)
-      (Maximum { maxRelative = rel }, _) -> min upper1 (upper2 - rel)
+      -- For maximum, take the minimum over the first upper-bound, the
+      -- second decremented by the fixed portion, and the second
+      -- decremented by the relative portion.
+      (Maximum { maxFixed = fixed, maxRelative = rel }, _) ->
+        min upper1 (min (upper2 - fixed) (upper2 - rel))
 
+    -- If the new upper bound is negative, the overrun is its absolute value
     newoverrun =
       if newupper < 0
         then Relative { relOffset = abs newupper }
         else Fixed { fixedOffset = 0 }
 
   in
+    -- For the new column, use advance
     (newupper, col1 `advance` col2,
      Render { renderBuilder = newbuild, renderIndent = ind,
+              -- For the new overrun, take the max of the existing
+              -- overruns and newoverrun
               renderOverrun = max (max overrun1 overrun2) newoverrun,
               renderLines = lines1 + lines2 })
 
--- | Combine two results into an option
+-- | Combine two results into a Multi.  This achieves the same result
+-- as HashMap.unionWith bestRender (meaning, union these maps,
+-- combining using bestRender to pick when both maps have a given
+-- index), but handles Singles as well.
 mergeResults :: Result -> Result -> Result
-mergeResults s1 @ Single { singleRender = r1 @ Render { renderLines = lines1 },
+-- Single is equivalent to a single-entry HashMap
+mergeResults s1 @ Single { singleRender =
+                              r1 @ Render { renderOverrun = overrun1,
+                                            renderLines = lines1 },
                            singleUpper = upper1, singleCol = col1 }
-             s2 @ Single { singleRender = r2 @ Render { renderLines = lines2 },
+             s2 @ Single { singleRender =
+                              r2 @ Render { renderOverrun = overrun2,
+                                            renderLines = lines2 },
                            singleUpper = upper2, singleCol = col2 }
+  -- If the keys would collide
   | upper1 == upper2 && col1 == col2 =
-    if lines1 < lines2 then s1 else s2
+    -- Duplicate the functionality of bestRender
+    if overrun1 < overrun2
+      then s1
+      else if overrun1 > overrun2
+        then s2
+        else if lines1 < lines2
+          then s1
+          else s2
+  -- Otherwise, create a Multi
   | otherwise =
     Multi { multiOptions =
                HashMap.fromList [(Offsets { offsetUpper = upper1,
@@ -1189,11 +1286,14 @@ mergeResults s1 @ Single { singleRender = r1 @ Render { renderLines = lines1 },
 mergeResults Single { singleRender = render, singleUpper = upper,
                       singleCol = col }
              Multi { multiOptions = opts } =
+  -- Do an insertWith bestRender
   let
     offsets = Offsets { offsetUpper = upper, offsetCol = col }
   in
    Multi { multiOptions = HashMap.insertWith bestRender offsets render opts }
+-- This operation is commutative
 mergeResults m @ Multi {} s @ Single {} = mergeResults s m
+-- Otherwise it's a straightaway HashMap union
 mergeResults Multi { multiOptions = opts1 } Multi { multiOptions = opts2 } =
   Multi { multiOptions = HashMap.unionWith bestRender opts1 opts2 }
 
@@ -1208,6 +1308,21 @@ contentBuilder None builder _ _ = builder
 
 -- | Produce a 'Builder' that renders the 'Doc' using the optimal
 -- layout engine.
+
+-- Basic algorithm overview: each Doc is rendering into a Result,
+-- which has an upper-bound (the last column at which we can start
+-- without causing an overrun), an ending column (which may be a
+-- relative or fixed position), and the actual render, which has a
+-- "badness".  A negative upper-bound value indicates overrun.
+--
+-- We keep only ONE result for each upper-bound, start column pair
+-- (ie. the best one).  This forms the "frontier" for the dynamic
+-- programming algorithm.
+--
+-- Note that due to the complexity of the combinators, we CAN see
+-- cubic time/space complexity.  However, actual running times are
+-- much lower, especially for Docs that contain many hard linebreaks
+-- and few Options.
 buildOptimal :: Int
              -- ^ The maximum number of columns.
              -> Bool
@@ -1221,9 +1336,13 @@ buildOptimal maxcol ansiterm doc =
     -- For char, bytestring, and lazy bytestring,
     buildDynamic _ _ ind Char { charContent = chr } =
       let
+        -- Why would you have maxcol == 0?  Who knows, but check for it.
         overrun = if maxcol >= 1 then Relative 0 else Relative (maxcol - 1)
         builder = contentBuilder ind (fromChar chr)
       in
+        -- Single characters have a single possibility, a relative
+        -- ending position one beyond the start, and an upper-bound
+        -- one shorter than the maximum width.
         Single {
           singleRender =
              Render { renderLines = 0, renderOverrun = overrun,
@@ -1232,15 +1351,22 @@ buildOptimal maxcol ansiterm doc =
         }
     buildDynamic _ _ ind Builder { builderContent = txt, builderLength = len } =
       let
+        -- Why would you have maxcol == 0?  Who knows, but check for it.
         overrun = if maxcol >= len then Relative 0 else Relative (len - maxcol)
         builder = contentBuilder ind txt
       in
+        -- Text has a single possibility and a relative ending position
+        -- equal to its length
        Single {
          singleRender = Render { renderLines = 0, renderOverrun = overrun,
                                  renderBuilder = builder, renderIndent = None },
          singleCol = Relative len, singleUpper = maxcol - len
        }
     buildDynamic _ nesting _ Line {} =
+      -- A newline starts at the nesting level, has no overrun, and an
+      -- upper-bound equal to the maximum column width.
+      --
+      -- Note: the upper bound is adjusted elsewhere.
       Single {
         singleRender = Render { renderOverrun = Fixed { fixedOffset = 0 },
                                 renderIndent = Full, renderLines = 1,
@@ -1248,7 +1374,10 @@ buildOptimal maxcol ansiterm doc =
                                                 fromChar '\n' },
         singleCol = nesting, singleUpper = maxcol
       }
+    -- This is for an empty cat, ie. the empty document
     buildDynamic _ _ ind Cat { catDocs = [] } =
+      -- The empty document has no content, no overrun, a relative end
+      -- position of 0, and an upper-bound of maxcol.
       Single {
         singleRender = Render { renderOverrun = Fixed { fixedOffset = 0 },
                                 renderIndent = ind, renderLines = 0,
@@ -1257,11 +1386,15 @@ buildOptimal maxcol ansiterm doc =
       }
     buildDynamic sgr nesting ind Cat { catDocs = first : rest } =
       let
+        -- Glue two Results together.  This gets used in a fold.
         appendResults :: Result -> Doc -> Result
+        -- The accumulated result is a Single.
         appendResults Single { singleRender =
                                   render1 @ Render { renderIndent = ind' },
                                singleUpper = upper1, singleCol = col1 } doc' =
+          -- Render the document.
           case buildDynamic sgr nesting ind' doc' of
+            -- If there's a single result, it's easy; just use appendOne.
             Single { singleUpper = upper2, singleCol = col2,
                      singleRender = render2 } ->
               let
@@ -1270,8 +1403,12 @@ buildOptimal maxcol ansiterm doc =
               in
                 Single { singleUpper = newupper, singleCol = newcol,
                          singleRender = newrender }
+            -- Otherwise, we have to fold over all the options and
+            -- glue on the accumulated result.
             Multi { multiOptions = opts } ->
               let
+                -- Level 2 fold function: glue the accumulated result
+                -- on to an option.
                 foldfun :: HashMap Offsets Render -> Offsets -> Render ->
                            HashMap Offsets Render
                 foldfun accum Offsets { offsetUpper = upper2,
@@ -1282,15 +1419,22 @@ buildOptimal maxcol ansiterm doc =
                   in
                     insertRender newupper newcol newrender accum
               in
+                -- Fold it up, then use packResult.
                 packResult (HashMap.foldlWithKey' foldfun HashMap.empty opts)
+        -- If the accumulate result is a multi, then we'll need to
+        -- glue the next render on to each option.
         appendResults Multi { multiOptions = opts } doc' =
           let
+            -- Outer fold, over each option in the accumulated result,
+            -- gluing on the next render.
             outerfold :: HashMap Offsets Render -> Offsets -> Render ->
                          HashMap Offsets Render
             outerfold accum Offsets { offsetUpper = upper1,
                                       offsetCol = col1 }
                       render1 @ Render { renderIndent = ind' } =
               case buildDynamic sgr nesting ind' doc' of
+                -- If the render is a single result, then just glue it
+                -- on to the current option.
                 Single { singleUpper = upper2, singleCol = col2,
                          singleRender = render2 } ->
                   let
@@ -1298,8 +1442,12 @@ buildOptimal maxcol ansiterm doc =
                       appendOne (upper1, col1, render1) (upper2, col2, render2)
                   in
                     insertRender newupper newcol newrender accum
+                -- If the render result is ALSO a Multi, then we need
+                -- to do another level of fold to glue those options
+                -- on to the current one.
                 Multi { multiOptions = opts2 } ->
                   let
+                    -- Innermost fold, glues two options together
                     innerfold :: HashMap Offsets Render -> Offsets -> Render ->
                                  HashMap Offsets Render
                     innerfold accum' Offsets { offsetUpper = upper2,
@@ -1311,31 +1459,48 @@ buildOptimal maxcol ansiterm doc =
                       in
                         insertRender newupper newcol newrender accum'
                   in
+                    -- Don't bother calling packResult here, we'll do
+                    -- it at the end anyway.
                     HashMap.foldlWithKey' innerfold accum opts2
           in
+            -- Fold it up, then use packResult.
             packResult (HashMap.foldlWithKey' outerfold HashMap.empty opts)
 
+        -- Build the first item
         firstres = buildDynamic sgr nesting ind first
       in
+        -- Fold them all together with appendResults
         foldl appendResults firstres rest
     buildDynamic sgr nesting ind Nest { nestDelay = delay, nestDoc = inner,
                                         nestAlign = alignnest,
                                         nestLevel = lvl } =
       let
+        -- Wrap up the render functions in code that alters the
+        -- nesting and column numbers.
         updateRender =
           if alignnest
+            -- If we're relative to the current column, then make the
+            -- new nesting equal to the current column, plus an
+            -- offset.
             then \r @ Render { renderBuilder = builder } ->
                    r { renderBuilder = \_ c -> builder (c + lvl) c }
+            -- Otherwise, make it relative to the current nesting level.
             else \r @ Render { renderBuilder = builder } ->
                    r { renderBuilder = \n c -> builder (n + lvl) c }
 
+        -- If we delay the indentation, don't alter the indent mode,
+        -- otherwise, set it.
         newindent = if delay then ind else Partial
 
         res =
           if alignnest
+            -- If we're aligning to the current column, the nesting
+            -- becomes a relative offset.
             then buildDynamic sgr (Relative lvl) newindent inner
+            -- Otherwise, we have to update the nesting level.
             else
               let
+                -- Basically, increment everything by the nesting level.
                 newnesting = case nesting of
                   Fixed { fixedOffset = n } -> Fixed { fixedOffset = n + lvl }
                   Relative { relOffset = n } -> Relative { relOffset = n + lvl }
@@ -1344,20 +1509,25 @@ buildOptimal maxcol ansiterm doc =
               in
                 buildDynamic sgr newnesting newindent inner
       in case res of
+        -- Update the render for a Single.
         s @ Single { singleRender = r } -> s { singleRender = updateRender r }
+        -- Update all renders for a Multi.
         m @ Multi { multiOptions = opts } ->
           m { multiOptions = HashMap.map updateRender opts }
     buildDynamic sgr nesting ind Choose { chooseOptions = options } =
       let
+        -- Build up all the components
         results = map (buildDynamic sgr nesting ind) options
       in
+        -- Now merge them into an minimal set of options
         foldl1 mergeResults results
     buildDynamic sgr1 nesting ind Graphics { graphicsSGR = sgr2,
                                              graphicsDoc = inner }
+      -- Only do graphics if the ansiterm flag is set.
       | ansiterm =
         let
           -- Insert graphics control characters without updating
-          -- column numbers.
+          -- column numbers, as they aren't visible.
           wrapBuilder r @ Render { renderBuilder = build } =
             r { renderBuilder = \n c -> switchGraphics sgr1 sgr2 `mappend`
                                         build n c `mappend`
@@ -1367,8 +1537,10 @@ buildOptimal maxcol ansiterm doc =
             s { singleRender = wrapBuilder render }
           m @ Multi { multiOptions = opts } ->
             m { multiOptions = HashMap.map wrapBuilder opts }
+      -- Otherwise, skip it entirely
       | otherwise = buildDynamic sgr2 nesting ind inner
 
+    -- Call buildDynamic, get the result, then pick the best one.
     Render { renderBuilder = result } =
       case buildDynamic Default Fixed { fixedOffset = 0 } None doc of
         Single { singleRender = render } -> render

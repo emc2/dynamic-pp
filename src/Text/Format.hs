@@ -879,8 +879,9 @@ enclose left right middle = hcat [left, middle, right]
 -- | Concatenate a list of 'Doc's into a single doc, with each element
 -- separated from the others by a given 'Doc' representing
 -- punctuation.
-punctuate :: Doc -> [Doc] -> Doc
-punctuate punc = concat . intersperse punc
+punctuate :: Doc -> [Doc] -> [Doc]
+punctuate punc (first : rest @ (_ : _)) = first <> punc : punctuate punc rest
+punctuate _ doc = doc
 
 -- | Enclose a list of 'Doc's, separated by punctuation, and align
 -- nesting of the contents to the end of the left enclosing 'Doc'
@@ -888,7 +889,7 @@ encloseSep :: Doc -> Doc -> Doc -> [Doc] -> Doc
 encloseSep left right _ [] = left <> right
 encloseSep left right _ [doc] = left <> doc <> right
 encloseSep left right middle docs =
-  left <> align (punctuate middle docs) <> right
+  left <> align (concat (punctuate middle docs)) <> right
 
 -- | Render a list, enclosed in brackets and separated by commas.
 list :: [Doc] -> Doc

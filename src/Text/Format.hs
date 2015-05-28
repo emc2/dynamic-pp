@@ -1297,13 +1297,18 @@ mergeResults m @ Multi {} s @ Single {} = mergeResults s m
 mergeResults Multi { multiOptions = opts1 } Multi { multiOptions = opts2 } =
   Multi { multiOptions = HashMap.unionWith bestRender opts1 opts2 }
 
+-- Add indentation on to a builder.  Note, this is used to create the
+-- builder functions used in Render.
 contentBuilder :: Indent -> Builder -> Int -> Int -> Builder
+-- For full indentation, glue on the full indent
 contentBuilder Full builder nesting _ =
   makespaces nesting `mappend` builder
+-- For partial indentation, bring us up to the current indent level
 contentBuilder Partial builder nesting col =
   if col < nesting
     then makespaces (nesting - col) `mappend` builder
     else builder
+-- Otherwise, do nothing.
 contentBuilder None builder _ _ = builder
 
 -- | Produce a 'Builder' that renders the 'Doc' using the optimal

@@ -5,11 +5,11 @@ License:                BSD3
 License-File:           LICENSE
 Author:                 Eric McCorkle
 Maintainer:             Eric McCorkle <emc2@metricspace.net>
-Stability:              Pre-alpha
+Stability:              Alpha
 Synopsis:               A pretty-print library that employs a dynamic programming algorithm for optimal rendering.
 Homepage:               https://github.com/emc2/dynamic-pp
 Bug-Reports:            https://github.com/emc2/dynamic-pp/issues
-Copyright:              Copyright (c) 2014 Eric McCorkle.  All rights reserved.
+Copyright:              Copyright (c) 2015 Eric McCorkle.  All rights reserved.
 Description:
   This library provides pretty-print operators similar to the set provided by the Wadler-Leijin pretty-printer.
   The main difference, however, is that it utilizes a dynamic programming algorithm for rendering.  This slightly

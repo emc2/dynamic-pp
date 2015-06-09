@@ -53,6 +53,7 @@ module Text.Format(
        empty,
        line,
        linebreak,
+       hardline,
        softline,
        softbreak,
 
@@ -139,6 +140,7 @@ module Text.Format(
        -- *** Derived
        (<>),
        (<+>),
+       (<!>),
        (<$>),
        (<$$>),
        (</>),
@@ -173,10 +175,12 @@ module Text.Format(
 
 import Blaze.ByteString.Builder
 import Blaze.ByteString.Builder.Char.Utf8
+import Control.Arrow((***))
 import Control.Monad
 import Data.Hashable
+import Data.HashSet(HashSet)
 import Data.HashMap.Strict(HashMap)
-import Data.List(intersperse, minimumBy)
+import Data.List(intersperse, minimumBy, sort)
 import Data.Maybe
 import Data.Monoid hiding ((<>))
 import Data.Word
@@ -190,8 +194,18 @@ import qualified Data.ByteString.Lazy as Lazy
 import qualified Data.ByteString.Lazy.Char8 as Lazy.Char8
 import qualified Data.ByteString.Lazy.UTF8 as Lazy.UTF8
 import qualified Data.HashMap.Strict as HashMap
+import qualified Data.HashSet as HashSet
 
 -- | Datatype representing a formatted document.
+
+data LineKind =
+    -- | Unerasable linebreak
+    Hard
+    -- | Linebreak replaced with nothing
+  | Soft
+    -- | Linebreak replaced with a space
+  | Break
+    deriving (Ord, Eq, Enum)
 
 -- Docs are organized into a tree structure whose nodes dictate the
 -- formatting of the generated text.  These are rendered by the
@@ -202,16 +216,16 @@ data Doc =
     Char { charContent :: !Char }
     -- | A raw Builder that constructs a string containing no
     -- newlines.  This is used to represent basic text.
-  | Builder {
+  | Content {
       -- | Length of the text that gets built.
-      builderLength :: !Int,
+      contentLength :: !Int,
       -- | A Builder that constructs the text.
-      builderContent :: !Builder
+      contentString :: !Lazy.ByteString
     }
-    -- | A newline.
+    -- | An erasable newline.
   | Line {
       -- | Whether to insert a space when undone by a group.
-      insertSpace :: !Bool
+      lineKind :: !LineKind
     }
     -- | Concatenated documents.  An empty list here represents an empty @Doc@.
   | Cat {
@@ -232,7 +246,7 @@ data Doc =
     -- | Choose the \"best\" from among a list of options.
   | Choose {
       -- | The list of options.
-      chooseOptions :: [Doc]
+      chooseOptions :: HashSet Doc
     }
     -- | Set graphics mode options when rendering the child @Doc@.
   | Graphics {
@@ -241,6 +255,7 @@ data Doc =
       -- | Document to render with graphic mode.
       graphicsDoc :: Doc
     }
+    deriving (Eq)
 
 -- | Graphics options for ANSI terminals.  All options are wrapped in
 -- the 'Maybe' datatype, with 'Nothing' meaning \"leave this option
@@ -264,6 +279,80 @@ data Graphics =
     }
     -- | Reset the terminal in this mode.
   | Default
+    deriving (Ord, Eq)
+
+instance Ord Doc where
+  compare Char { charContent = c1 } Char { charContent = c2 } = compare c1 c2
+  compare Char {} _ = LT
+  compare _ Char {} = GT
+  compare Content { contentString = str1 } Content { contentString = str2 } =
+    compare str1 str2
+  compare Content {} _ = LT
+  compare _ Content {} = GT
+  compare Line { lineKind = kind1 } Line { lineKind = kind2 } =
+    compare kind1 kind2
+  compare Line {} _ = LT
+  compare _ Line {} = GT
+  compare Cat { catDocs = docs1 } Cat { catDocs = docs2 } = compare docs1 docs2
+  compare Cat {} _ = LT
+  compare _ Cat {} = GT
+  compare Nest { nestLevel = lvl1, nestAlign = al1,
+                 nestDelay = delay1, nestDoc = doc1 }
+          Nest { nestLevel = lvl2, nestAlign = al2,
+                 nestDelay = delay2, nestDoc = doc2 } =
+    case compare lvl1 lvl2 of
+      EQ -> case compare al1 al2 of
+        EQ -> case compare delay1 delay2 of
+          EQ -> compare doc1 doc2
+          out -> out
+        out -> out
+      out -> out
+  compare Nest {} _ = LT
+  compare _ Nest {} = GT
+  compare Choose { chooseOptions = opts1 } Choose { chooseOptions = opts2 } =
+    compare (sort (HashSet.toList opts1)) (sort (HashSet.toList opts2))
+  compare Choose {} _ = LT
+  compare _ Choose {} = GT
+  compare Graphics { graphicsSGR = sgr1, graphicsDoc = doc1 }
+          Graphics { graphicsSGR = sgr2, graphicsDoc = doc2 } =
+    case compare sgr1 sgr2 of
+      EQ -> compare doc1 doc2
+      out -> out
+
+instance Hashable LineKind where
+  hashWithSalt s = hashWithSalt s . fromEnum
+
+instance Hashable Doc where
+  hashWithSalt s Char { charContent = c } =
+    s `hashWithSalt` (0 :: Int) `hashWithSalt` c
+  hashWithSalt s Content { contentLength = len, contentString = str } =
+    s `hashWithSalt` (1 :: Int) `hashWithSalt` len `hashWithSalt` str
+  hashWithSalt s Line { lineKind = kind } =
+    s `hashWithSalt` (2 :: Int) `hashWithSalt` kind
+  hashWithSalt s Cat { catDocs = docs } =
+    s `hashWithSalt` (3 :: Int) `hashWithSalt` docs
+  hashWithSalt s Nest { nestLevel = lvl, nestAlign = al,
+                        nestDelay = delay, nestDoc = doc } =
+    s `hashWithSalt` (4 :: Int) `hashWithSalt` lvl `hashWithSalt`
+    al `hashWithSalt` delay `hashWithSalt` doc
+  hashWithSalt s Choose { chooseOptions = opts } =
+    s `hashWithSalt` (5 :: Int) `hashWithSalt` sort (HashSet.toList opts)
+  hashWithSalt s Graphics { graphicsSGR = sgr, graphicsDoc = doc } =
+    s `hashWithSalt` (6 :: Int) `hashWithSalt` sgr `hashWithSalt` doc
+
+instance Hashable Graphics where
+  hashWithSalt s Options { consoleIntensity = consIntensity,
+                           swapForegroundBackground = swap,
+                           underlining = underline,
+                           foreground = fore,
+                           background = back,
+                           blinkSpeed = blink } =
+    s `hashWithSalt` (0 :: Int) `hashWithSalt`
+    fmap fromEnum consIntensity `hashWithSalt`
+    fmap fromEnum swap `hashWithSalt` fmap fromEnum underline `hashWithSalt`
+    fmap (fromEnum *** fromEnum) fore `hashWithSalt`
+    fmap (fromEnum *** fromEnum) back `hashWithSalt` fmap fromEnum blink
+  hashWithSalt s Default = s `hashWithSalt` (1 :: Int)
 
 -- | Generate a 'Doc' representing a graphics mode switch.
 switchGraphics :: Graphics -> Graphics -> Builder
@@ -342,22 +431,26 @@ empty = Cat { catDocs = [] }
 -- | A 'Doc' consisting of a linebreak, that is not turned into a
 -- space when erased by a 'group'.
 line :: Doc
-line = Line { insertSpace = False }
+line = Line { lineKind = Soft }
 
 -- | A 'Doc' consisting of a linebreak, that is turned into a space
 -- when erased by a 'group'.
 linebreak :: Doc
-linebreak = Line { insertSpace = True }
+linebreak = Line { lineKind = Break }
+
+-- | A 'Doc' consisting of a linebreak that cannot be erased by a 'group'.
+hardline :: Doc
+hardline = Line { lineKind = Hard }
 
 -- | A 'Doc' consisting of a space character, that can be turned into
 -- a linebreak in order to break lines that are too long.
 softline :: Doc
-softline = Choose { chooseOptions = [ char ' ', linebreak ] }
+softline = Choose { chooseOptions = HashSet.fromList [ char ' ', linebreak ] }
 
 -- | An empty 'Doc' that can be turned into a linebreak in order to
 -- break lines that are too long.
 softbreak :: Doc
-softbreak = Choose { chooseOptions = [ empty, line ] }
+softbreak = Choose { chooseOptions = HashSet.fromList [ empty, line ] }
 
 -- | A 'Doc' containing a single character.
 char :: Char -> Doc
@@ -366,22 +459,22 @@ char chr = Char { charContent = chr }
 
 -- | Create a 'Doc' containing a string.
 string :: String -> Doc
-string str = Builder { builderContent = fromString str,
-                       builderLength = length str }
+string str = Content { contentString = Lazy.UTF8.fromString str,
+                       contentLength = length str }
 
 -- | Create a 'Doc' containing a bytestring.
 bytestring :: Strict.ByteString -> Doc
 bytestring txt
   | Strict.null txt = empty
-  | otherwise = Builder { builderLength = Strict.UTF8.length txt,
-                          builderContent = fromByteString txt }
+  | otherwise = Content { contentLength = Strict.UTF8.length txt,
+                          contentString = Lazy.fromStrict txt }
 
 -- | Create a 'Doc' containing a lazy bytestring
 lazyBytestring :: Lazy.ByteString -> Doc
 lazyBytestring txt
   | Lazy.null txt = empty
-  | otherwise = Builder { builderLength = Lazy.UTF8.length txt,
-                          builderContent = fromLazyByteString txt }
+  | otherwise = Content { contentLength = Lazy.UTF8.length txt,
+                          contentString = txt }
 
 -- | The character @(@
 lparen :: Doc
@@ -798,6 +891,10 @@ vividBlackBackground = graphics Options { consoleIntensity = Nothing,
 (<+>) :: Doc -> Doc -> Doc
 left <+> right = left <> space <> right
 
+-- | Join two 'Doc's with a 'hardline' in between them.
+(<!>) :: Doc -> Doc -> Doc
+left <!> right = left <> hardline <> right
+
 -- | Join two 'Doc's with a 'line' in between them.
 (<$>) :: Doc -> Doc -> Doc
 left <$> right = left <> line <> right
@@ -832,7 +929,7 @@ concat docs = Cat { catDocs = docs }
 choose :: [Doc] -> Doc
 choose [] = empty
 choose [doc] = doc
-choose docs = Choose { chooseOptions = docs }
+choose docs = Choose { chooseOptions = HashSet.fromList docs }
 
 -- | Concatenate a list of 'Doc's.  This is generally more efficient
 -- than repeatedly using 'beside' or '<>'.
@@ -856,11 +953,11 @@ vcat = concat . intersperse linebreak
 
 -- | Join a list of 'Doc's using either 'hsep' or 'vsep'.
 sep :: [Doc] -> Doc
-sep docs = Choose { chooseOptions = [hsep docs, vsep docs] }
+sep docs = Choose { chooseOptions = HashSet.fromList [hsep docs, vsep docs] }
 
 -- | Join a list of 'Doc's using either 'hcat' or 'vcat'.
 cat :: [Doc] -> Doc
-cat docs = Choose { chooseOptions = [hcat docs, vcat docs] }
+cat docs = Choose { chooseOptions = HashSet.fromList [hcat docs, vcat docs] }
 
 -- | Join a list of 'Doc's with 'softline's in between each.  This is
 -- generally more efficient than repeatedly using '</>'.
@@ -897,30 +994,42 @@ list = group . encloseSep lbrack rbrack (comma <> line)
 
 -- | Erase all linebreaks in a 'Doc' and replace them with either
 -- spaces or nothing, depending on the kind of linebreak.
-flatten :: Doc -> Doc
-flatten Line { insertSpace = True } = Char { charContent = ' ' }
-flatten Line { insertSpace = False } = empty
-flatten Cat { catDocs = docs } = Cat { catDocs = map flatten docs }
+flatten :: Doc -> Maybe Doc
+flatten Line { lineKind = Hard } = Nothing
+flatten Line { lineKind = Break } = Just Char { charContent = ' ' }
+flatten Line { lineKind = Soft } = Just empty
+flatten Cat { catDocs = docs } =
+  case mapMaybe flatten docs of
+    [] -> Nothing
+    flatinner -> Just Cat { catDocs = flatinner }
 flatten Choose { chooseOptions = docs } =
-  Choose { chooseOptions = map flatten docs }
-flatten n @ Nest { nestDoc = inner } = n { nestDoc = flatten inner }
-flatten doc = doc
+  case mapMaybe flatten (HashSet.toList docs) of
+    [] -> Nothing
+    flatdocs -> Just Choose { chooseOptions = HashSet.fromList flatdocs }
+flatten n @ Nest { nestDoc = inner } =
+  do
+    flatinner <- flatten inner
+    return n { nestDoc = flatinner }
+flatten doc = Just doc
 
 -- | A 'Doc' that 'choose's between the unmodified argument, or the
 -- 'flatten'ed version of the argument.
 group :: Doc -> Doc
-group doc = Choose { chooseOptions = [ doc, flatten doc ] }
+group doc = case flatten doc of
+  Just flatdoc -> Choose { chooseOptions = HashSet.fromList [ doc, flatdoc ] }
+  Nothing -> doc
 
 -- | Produce a 'Builder' that renders the 'Doc' to one line.
 buildOneLine :: Doc -> Builder
 buildOneLine Char { charContent = chr } = fromChar chr
-buildOneLine Builder { builderContent = builder } = builder
-buildOneLine Line { insertSpace = True } = fromChar ' '
-buildOneLine Line { insertSpace = False } = mempty
+buildOneLine Content { contentString = builder } = fromLazyByteString builder
+buildOneLine Line { lineKind = Break } = fromChar ' '
+buildOneLine Line { lineKind = Soft } = mempty
+buildOneLine Line { lineKind = Hard } = fromChar '\n'
 buildOneLine Cat { catDocs = docs } = mconcat (map buildOneLine docs)
 buildOneLine Nest { nestDoc = inner } = buildOneLine inner
-buildOneLine Choose { chooseOptions = first : _ } = buildOneLine first
-buildOneLine Choose {} = error "Choose with no options"
+buildOneLine Choose { chooseOptions = opts } =
+  buildOneLine (head (HashSet.toList opts))
 buildOneLine Graphics { graphicsDoc = inner } = buildOneLine inner
 
 -- | Render the entire 'Doc' to one line.  Good for output that
@@ -937,12 +1046,12 @@ putOneLine handle =
 -- | Produce a 'Builder' that renders the 'Doc' quickly.
 buildFast :: Doc -> Builder
 buildFast Char { charContent = chr } = fromChar chr
-buildFast Builder { builderContent = builder } = builder
+buildFast Content { contentString = builder } = fromLazyByteString builder
 buildFast Line {} = fromChar '\n'
 buildFast Cat { catDocs = docs } = mconcat (map buildFast docs)
 buildFast Nest { nestDoc = inner } = buildFast inner
-buildFast Choose { chooseOptions = first : _ } = buildFast first
-buildFast Choose {} = error "Choose with no options"
+buildFast Choose { chooseOptions = opts } =
+  buildFast (head (HashSet.toList opts))
 buildFast Graphics { graphicsDoc = inner } = buildFast inner
 
 -- | Render the entire 'Doc', preserving newlines, but without any
@@ -1355,11 +1464,11 @@ buildOptimal maxcol ansiterm doc =
                       renderBuilder = builder, renderIndent = None },
           singleCol = Relative 1, singleUpper = maxcol - 1
         }
-    buildDynamic _ _ ind Builder { builderContent = txt, builderLength = len } =
+    buildDynamic _ _ ind Content { contentString = txt, contentLength = len } =
       let
         -- Why would you have maxcol == 0?  Who knows, but check for it.
         overrun = if maxcol >= len then Relative 0 else Relative (len - maxcol)
-        builder = contentBuilder ind txt
+        builder = contentBuilder ind (fromLazyByteString txt)
       in
         -- Text has a single possibility and a relative ending position
         -- equal to its length
@@ -1523,7 +1632,7 @@ buildOptimal maxcol ansiterm doc =
     buildDynamic sgr nesting ind Choose { chooseOptions = options } =
       let
         -- Build up all the components
-        results = map (buildDynamic sgr nesting ind) options
+        results = map (buildDynamic sgr nesting ind) (HashSet.toList options)
       in
         -- Now merge them into an minimal set of options
         foldl1 mergeResults results

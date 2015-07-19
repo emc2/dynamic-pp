@@ -1185,27 +1185,6 @@ advance Maximum { maxFixed = fixed1, maxRelative = rel1 }
         Maximum { maxFixed = fixed2, maxRelative = rel2 } =
   Maximum { maxFixed = max fixed2 (fixed1 + rel2), maxRelative = rel1 + rel2 }
 
--- | Offsets structure.  this is used as a key in a hash table.  It is
--- also important to how the algorithm works.  Renderings represent
--- "chunks", which have an ending column and a maximum column.  The
--- algorithm glues these chunks together, then evaluates their
--- "badness" using the 'advance' function to recalculate the ending
--- column and the maximum starting offset.
-data Offsets =
-  Offsets {
-    -- | Upper-bound: Highest starting column for this document
-    -- without causing overrun.  If this is negative, it means you've
-    -- overrun by that much.
-    offsetUpper :: !Int,
-    -- | Ending column.
-    offsetCol :: !Column
-  }
-  deriving Eq
-
-instance Hashable Offsets where
-  hashWithSalt s Offsets { offsetUpper = upper, offsetCol = col } =
-    s `hashWithSalt` upper `hashWithSalt` col
-
 -- | A rendering of a document.
 -- Renderings store three basic things: A notion of the "badness" of
 -- this particular rendering (represented by the overrun and the
@@ -1229,6 +1208,7 @@ data Render =
     renderIndent :: !Indent
   }
 
+-- | Determine whether the first 'Render' is strictly better than the second.
 subsumes :: Render -> Render -> Bool
 -- Simple comparisons: if the upper bound is greater, the lines are
 -- less, and the column is less, then the render is always better.
@@ -1287,18 +1267,14 @@ data Result =
 -- | Generate n spaces
 makespaces :: Int -> Builder
 makespaces n = fromLazyByteString (Lazy.Char8.replicate (fromIntegral n) ' ')
-{-
--- | Pick the best rendering of two.
-bestRender :: Render -> Render -> Render
-bestRender r1 @ Render { renderLines = lines1, renderOverrun = overrun1 }
-           r2 @ Render { renderLines = lines2, renderOverrun = overrun2 }
-    -- If one overruns less than the other, pick that one.
-  | overrun1 < overrun2 = r1
-  | overrun1 > overrun2 = r2
-    -- Otherwise, pick the shortest one.
-  | otherwise = if lines1 < lines2 then r1 else r2
--}
--- Add a result into the HashMap
+
+-- Add a 'Render' into a result set, ensuring that any subsumed
+-- renders are dropped.
+--
+-- XXX The asymptotic runtime of this could likely be improved by some
+-- kind of tree structure; however, the design of this structure is
+-- nontrivial, due to the 3+-dimensional nature of subsumption, and
+-- the wierd interactions between the various kinds of column offsets.
 insertRender :: [Render] -> Render -> [Render]
 insertRender renders ins
     -- If the inserted element is subsumed by anything in the

@@ -179,7 +179,7 @@ import Control.Arrow((***))
 import Control.Monad
 import Data.Hashable
 import Data.HashSet(HashSet)
-import Data.HashMap.Strict(HashMap)
+--import Data.HashMap.Strict(HashMap)
 import Data.List(intersperse, minimumBy, sort)
 import Data.Maybe
 import Data.Monoid hiding ((<>))
@@ -193,7 +193,7 @@ import qualified Data.ByteString.UTF8 as Strict.UTF8
 import qualified Data.ByteString.Lazy as Lazy
 import qualified Data.ByteString.Lazy.Char8 as Lazy.Char8
 import qualified Data.ByteString.Lazy.UTF8 as Lazy.UTF8
-import qualified Data.HashMap.Strict as HashMap
+--import qualified Data.HashMap.Strict as HashMap
 import qualified Data.HashSet as HashSet
 
 -- | Datatype representing a formatted document.
@@ -1066,24 +1066,6 @@ putFast :: Handle -> Doc -> IO ()
 putFast handle =
   toByteStringIO (Strict.hPut handle) . buildFast
 
--- | A rendering of a document.
-
--- Renderings store three basic things: A notion of the "badness" of
--- this particular rendering (represented by the overrun and the
--- number of lines), the indentation mode for the next document, and a
--- function that actually produces the Builder.
-data Render =
-  Render {
-    -- | The number of lines in the document.
-    renderLines :: !Word,
-    -- | The largest amount by which we've overrun.
-    renderOverrun :: !Column,
-    -- | A builder that constructs the document.
-    renderBuilder :: !(Int -> Int -> Builder),
-    -- | Indentation mode for the next document.
-    renderIndent :: !Indent
-  }
-
 -- | Column data type.  Represents how rendered documents affect the
 -- current column.
 
@@ -1224,6 +1206,65 @@ instance Hashable Offsets where
   hashWithSalt s Offsets { offsetUpper = upper, offsetCol = col } =
     s `hashWithSalt` upper `hashWithSalt` col
 
+-- | A rendering of a document.
+-- Renderings store three basic things: A notion of the "badness" of
+-- this particular rendering (represented by the overrun and the
+-- number of lines), the indentation mode for the next document, and a
+-- function that actually produces the Builder.
+data Render =
+  Render {
+    -- | Upper-bound: Highest starting column for this document
+    -- without causing overrun.  If this is negative, it means you've
+    -- overrun by that much.
+    renderUpper :: !Int,
+    -- | Ending column.
+    renderCol :: !Column,
+    -- | The number of lines in the document.
+    renderLines :: !Word,
+    -- | The largest amount by which we've overrun.
+    renderOverrun :: !Column,
+    -- | A builder that constructs the document.
+    renderBuilder :: !(Int -> Int -> Builder),
+    -- | Indentation mode for the next document.
+    renderIndent :: !Indent
+  }
+
+subsumes :: Render -> Render -> Bool
+-- Simple comparisons: if the upper bound is greater, the lines are
+-- less, and the column is less, then the render is always better.
+subsumes Render { renderUpper = upper1, renderLines = lines1,
+                  renderCol = Fixed { fixedOffset = col1 } }
+         Render { renderUpper = upper2, renderLines = lines2,
+                  renderCol = Fixed { fixedOffset = col2 } } =
+  upper1 >= upper2 && lines1 <= lines2 && col1 <= col2
+subsumes Render { renderUpper = upper1, renderLines = lines1,
+                  renderCol = Relative { relOffset = col1 } }
+         Render { renderUpper = upper2, renderLines = lines2,
+                  renderCol = Relative { relOffset = col2 } } =
+  upper1 >= upper2 && lines1 <= lines2 && col1 <= col2
+-- A fixed column offset can subsume a relative offset
+subsumes Render { renderUpper = upper1, renderLines = lines1,
+                  renderCol = Fixed { fixedOffset = col1 } }
+         Render { renderUpper = upper2, renderLines = lines2,
+                  renderCol = Relative { relOffset = col2 } } =
+  upper1 >= upper2 && lines1 <= lines2 && col1 <= col2
+-- For two maximums, it's a straightaway comparison
+subsumes Render { renderUpper = upper1, renderLines = lines1,
+                  renderCol = Maximum { maxRelative = rel1,
+                                        maxFixed = fixed1 } }
+         Render { renderUpper = upper2, renderLines = lines2,
+                  renderCol = Maximum { maxRelative = rel2,
+                                        maxFixed = fixed2 } } =
+  upper1 >= upper2 && lines1 <= lines2 && rel1 <= rel2 && fixed1 <= fixed2
+-- Fixed can subsume a maximum as above
+subsumes Render { renderUpper = upper1, renderLines = lines1,
+                  renderCol =  Fixed { fixedOffset = col1 } }
+         Render { renderUpper = upper2, renderLines = lines2,
+                  renderCol = Maximum { maxRelative = rel2,
+                                        maxFixed = fixed2 } } =
+  upper1 >= upper2 && lines1 <= lines2 && col1 <= rel2 && col1 <= fixed2
+subsumes _ _ = False
+
 -- | A result.  This is split into 'Single' and 'Multi' in order to
 -- optimize for the common case of a single possible rendering.
 -- Otherwise, it would be perfectly fine to represent everything as a
@@ -1232,12 +1273,7 @@ data Result =
     -- | A single possible rendering.
     Single {
       -- | The rendered document.
-      singleRender :: !Render,
-      -- | The first column at which this render causes an overrun.
-      -- Same as 'offsetUpper'.
-      singleUpper :: !Int,
-      -- | The current column at the end of rendering.
-      singleCol :: !Column
+      singleRender :: !Render
     }
     -- | Multiple possible renderings.
   | Multi {
@@ -1245,13 +1281,13 @@ data Result =
       -- upper-bound (meaning the first column at which using any of
       -- the contents will cause an overrun).  The second map is
       -- indexed by the ending column.
-      multiOptions :: !(HashMap Offsets Render)
+      multiOptions :: ![Render]
     }
 
 -- | Generate n spaces
 makespaces :: Int -> Builder
 makespaces n = fromLazyByteString (Lazy.Char8.replicate (fromIntegral n) ' ')
-
+{-
 -- | Pick the best rendering of two.
 bestRender :: Render -> Render -> Render
 bestRender r1 @ Render { renderLines = lines1, renderOverrun = overrun1 }
@@ -1261,28 +1297,25 @@ bestRender r1 @ Render { renderLines = lines1, renderOverrun = overrun1 }
   | overrun1 > overrun2 = r2
     -- Otherwise, pick the shortest one.
   | otherwise = if lines1 < lines2 then r1 else r2
-
+-}
 -- Add a result into the HashMap
-insertRender :: Int -> Column -> Render -> HashMap Offsets Render ->
-                HashMap Offsets Render
-insertRender upper col render =
-  let
-    offsets = Offsets { offsetUpper = upper, offsetCol = col }
-  in
-    HashMap.insertWith bestRender offsets render
+insertRender :: [Render] -> Render -> [Render]
+insertRender renders ins
+    -- If the inserted element is subsumed by anything in the
+    -- list, then don't insert it at all.
+  | any (`subsumes` ins) renders = renders
+    -- Otherwise, add the element to the list, and drop everything it subsumes.
+  | otherwise = ins : filter (not . subsumes ins) renders
 
 -- If a result only has one possibility, convert it to a Single.
 -- Otherwise, leave it.
-packResult :: HashMap Offsets Render -> Result
-packResult opts =
-  case HashMap.toList opts of
-    [(Offsets { offsetUpper = upper, offsetCol = col }, render)] ->
-      Single { singleCol = col, singleUpper = upper, singleRender = render }
-    _ -> Multi { multiOptions = opts }
+packResult :: [Render] -> Result
+packResult [opt] = Single { singleRender = opt }
+packResult opts = Multi { multiOptions = opts }
 
 -- Pick the best result out of a set of results.  Used at the end to
 -- pick the final result.
-bestRenderInOpts :: HashMap Offsets Render -> Render
+bestRenderInOpts :: [Render] -> Render
 bestRenderInOpts =
   let
     -- | Compare two Renders.  Less than means better.
@@ -1293,21 +1326,18 @@ bestRenderInOpts =
         EQ -> compare lines1 lines2
         out -> out
   in
-    minimumBy compareRenders . HashMap.elems
+    minimumBy compareRenders
 
 -- | Append operation on complete states.  A complete state is the
 -- contents of an Offset and a Render (ie. the contents of Single, or
 -- the contents of an entry in a Multi combined with the corresponding
 -- key).
-appendOne :: (Int, Column, Render) -> (Int, Column, Render) ->
-             (Int, Column, Render)
-appendOne (upper1, col1, Render { renderBuilder = build1,
-                                  renderLines = lines1,
-                                  renderOverrun = overrun1 })
-          (upper2, col2, Render { renderBuilder = build2,
-                                  renderLines = lines2,
-                                  renderOverrun = overrun2,
-                                  renderIndent = ind }) =
+appendOne :: Render -> Render -> Render
+appendOne Render { renderUpper = upper1, renderLines = lines1, renderCol = col1,
+                   renderOverrun = overrun1, renderBuilder = build1 }
+          Render { renderUpper = upper2, renderLines = lines2, renderCol = col2,
+                   renderOverrun = overrun2, renderBuilder = build2,
+                   renderIndent = ind } =
   let
     -- The new build is completely determined by the first render's
     -- starting column.
@@ -1352,13 +1382,13 @@ appendOne (upper1, col1, Render { renderBuilder = build1,
         else Fixed { fixedOffset = 0 }
 
   in
-    -- For the new column, use advance
-    (newupper, col1 `advance` col2,
-     Render { renderBuilder = newbuild, renderIndent = ind,
-              -- For the new overrun, take the max of the existing
-              -- overruns and newoverrun
-              renderOverrun = max (max overrun1 overrun2) newoverrun,
-              renderLines = lines1 + lines2 })
+    Render { renderBuilder = newbuild, renderIndent = ind,
+             renderLines = lines1 + lines2, renderUpper = newupper,
+             -- For the new overrun, take the max of the existing
+             -- overruns and newoverrun
+             renderOverrun = max (max overrun1 overrun2) newoverrun,
+             -- For the new column, use advance
+             renderCol = col1 `advance` col2 }
 
 -- | Combine two results into a Multi.  This achieves the same result
 -- as HashMap.unionWith bestRender (meaning, union these maps,
@@ -1366,46 +1396,19 @@ appendOne (upper1, col1, Render { renderBuilder = build1,
 -- index), but handles Singles as well.
 mergeResults :: Result -> Result -> Result
 -- Single is equivalent to a single-entry HashMap
-mergeResults s1 @ Single { singleRender =
-                              r1 @ Render { renderOverrun = overrun1,
-                                            renderLines = lines1 },
-                           singleUpper = upper1, singleCol = col1 }
-             s2 @ Single { singleRender =
-                              r2 @ Render { renderOverrun = overrun2,
-                                            renderLines = lines2 },
-                           singleUpper = upper2, singleCol = col2 }
-  -- If the keys would collide
-  | upper1 == upper2 && col1 == col2 =
-    -- Duplicate the functionality of bestRender
-    if overrun1 < overrun2
-      then s1
-      else if overrun1 > overrun2
-        then s2
-        else if lines1 < lines2
-          then s1
-          else s2
-  -- Otherwise, create a Multi
-  | otherwise =
-    Multi { multiOptions =
-               HashMap.fromList [(Offsets { offsetUpper = upper1,
-                                            offsetCol = col1 },
-                                  r1),
-                                 (Offsets { offsetUpper = upper2,
-                                            offsetCol = col2 },
-                                  r2)] }
-mergeResults Single { singleRender = render, singleUpper = upper,
-                      singleCol = col }
+mergeResults s1 @ Single { singleRender = r1 }
+             s2 @ Single { singleRender = r2 }
+  | subsumes r1 r2 = s1
+  | subsumes r2 r1 = s2
+  | otherwise = Multi { multiOptions = [r1, r2] }
+mergeResults Single { singleRender = render }
              Multi { multiOptions = opts } =
-  -- Do an insertWith bestRender
-  let
-    offsets = Offsets { offsetUpper = upper, offsetCol = col }
-  in
-   Multi { multiOptions = HashMap.insertWith bestRender offsets render opts }
+  packResult (insertRender opts render)
 -- This operation is commutative
 mergeResults m @ Multi {} s @ Single {} = mergeResults s m
 -- Otherwise it's a straightaway HashMap union
 mergeResults Multi { multiOptions = opts1 } Multi { multiOptions = opts2 } =
-  Multi { multiOptions = HashMap.unionWith bestRender opts1 opts2 }
+  packResult (foldl insertRender opts1 opts2)
 
 -- Add indentation on to a builder.  Note, this is used to create the
 -- builder functions used in Render.
@@ -1458,12 +1461,10 @@ buildOptimal maxcol ansiterm doc =
         -- Single characters have a single possibility, a relative
         -- ending position one beyond the start, and an upper-bound
         -- one shorter than the maximum width.
-        Single {
-          singleRender =
-             Render { renderLines = 0, renderOverrun = overrun,
-                      renderBuilder = builder, renderIndent = None },
-          singleCol = Relative 1, singleUpper = maxcol - 1
-        }
+        Single { singleRender =
+                    Render { renderOverrun = overrun, renderIndent = None,
+                             renderBuilder = builder, renderCol = Relative 1,
+                             renderLines = 0, renderUpper = maxcol - 1 } }
     buildDynamic _ _ ind Content { contentString = txt, contentLength = len } =
       let
         -- Why would you have maxcol == 0?  Who knows, but check for it.
@@ -1472,11 +1473,10 @@ buildOptimal maxcol ansiterm doc =
       in
         -- Text has a single possibility and a relative ending position
         -- equal to its length
-       Single {
-         singleRender = Render { renderLines = 0, renderOverrun = overrun,
-                                 renderBuilder = builder, renderIndent = None },
-         singleCol = Relative len, singleUpper = maxcol - len
-       }
+       Single { singleRender =
+                   Render { renderLines = 0, renderUpper = maxcol - len,
+                            renderBuilder = builder, renderCol = Relative len,
+                            renderIndent = None, renderOverrun = overrun } }
     buildDynamic _ nesting _ Line {} =
       -- A newline starts at the nesting level, has no overrun, and an
       -- upper-bound equal to the maximum column width.
@@ -1486,100 +1486,71 @@ buildOptimal maxcol ansiterm doc =
         singleRender = Render { renderOverrun = Fixed { fixedOffset = 0 },
                                 renderIndent = Full, renderLines = 1,
                                 renderBuilder = const $! const $!
-                                                fromChar '\n' },
-        singleCol = nesting, singleUpper = maxcol
-      }
+                                                fromChar '\n',
+                                renderCol = nesting, renderUpper = maxcol } }
     -- This is for an empty cat, ie. the empty document
     buildDynamic _ _ ind Cat { catDocs = [] } =
       -- The empty document has no content, no overrun, a relative end
       -- position of 0, and an upper-bound of maxcol.
       Single {
-        singleRender = Render { renderOverrun = Fixed { fixedOffset = 0 },
-                                renderIndent = ind, renderLines = 0,
-                                renderBuilder = const mempty },
-        singleCol = Relative { relOffset = 0 }, singleUpper = maxcol
-      }
+        singleRender = Render { renderOverrun = Fixed 0, renderIndent = ind,
+                                renderLines = 0, renderBuilder = const mempty,
+                                renderCol = Relative 0, renderUpper = maxcol } }
     buildDynamic sgr nesting ind Cat { catDocs = first : rest } =
       let
         -- Glue two Results together.  This gets used in a fold.
         appendResults :: Result -> Doc -> Result
         -- The accumulated result is a Single.
         appendResults Single { singleRender =
-                                  render1 @ Render { renderIndent = ind' },
-                               singleUpper = upper1, singleCol = col1 } doc' =
+                                  render1 @ Render { renderIndent = ind' } }
+                      doc' =
           -- Render the document.
           case buildDynamic sgr nesting ind' doc' of
             -- If there's a single result, it's easy; just use appendOne.
-            Single { singleUpper = upper2, singleCol = col2,
-                     singleRender = render2 } ->
+            Single { singleRender = render2  } ->
               let
-                (newupper, newcol, newrender) =
-                  appendOne (upper1, col1, render1) (upper2, col2, render2)
+                newrender = appendOne render1 render2
               in
-                Single { singleUpper = newupper, singleCol = newcol,
-                         singleRender = newrender }
+                Single { singleRender = newrender }
             -- Otherwise, we have to fold over all the options and
             -- glue on the accumulated result.
             Multi { multiOptions = opts } ->
               let
                 -- Level 2 fold function: glue the accumulated result
                 -- on to an option.
-                foldfun :: HashMap Offsets Render -> Offsets -> Render ->
-                           HashMap Offsets Render
-                foldfun accum Offsets { offsetUpper = upper2,
-                                        offsetCol = col2 } render2 =
-                  let
-                    (newupper, newcol, newrender) =
-                      appendOne (upper1, col1, render1) (upper2, col2, render2)
-                  in
-                    insertRender newupper newcol newrender accum
+                foldfun :: [Render] -> Render -> [Render]
+                foldfun accum = insertRender accum . appendOne render1
               in
                 -- Fold it up, then use packResult.
-                packResult (HashMap.foldlWithKey' foldfun HashMap.empty opts)
+                packResult (foldl foldfun [] opts)
         -- If the accumulate result is a multi, then we'll need to
         -- glue the next render on to each option.
         appendResults Multi { multiOptions = opts } doc' =
           let
             -- Outer fold, over each option in the accumulated result,
             -- gluing on the next render.
-            outerfold :: HashMap Offsets Render -> Offsets -> Render ->
-                         HashMap Offsets Render
-            outerfold accum Offsets { offsetUpper = upper1,
-                                      offsetCol = col1 }
-                      render1 @ Render { renderIndent = ind' } =
+            outerfold :: [Render] -> Render -> [Render]
+            outerfold accum render1 @ Render { renderIndent = ind' } =
               case buildDynamic sgr nesting ind' doc' of
                 -- If the render is a single result, then just glue it
                 -- on to the current option.
-                Single { singleUpper = upper2, singleCol = col2,
-                         singleRender = render2 } ->
-                  let
-                    (newupper, newcol, newrender) =
-                      appendOne (upper1, col1, render1) (upper2, col2, render2)
-                  in
-                    insertRender newupper newcol newrender accum
+                Single { singleRender = render2 } ->
+                  insertRender accum (appendOne render1 render2)
                 -- If the render result is ALSO a Multi, then we need
                 -- to do another level of fold to glue those options
                 -- on to the current one.
                 Multi { multiOptions = opts2 } ->
                   let
                     -- Innermost fold, glues two options together
-                    innerfold :: HashMap Offsets Render -> Offsets -> Render ->
-                                 HashMap Offsets Render
-                    innerfold accum' Offsets { offsetUpper = upper2,
-                                               offsetCol = col2 } render2 =
-                      let
-                        (newupper, newcol, newrender) =
-                          appendOne (upper1, col1, render1)
-                                    (upper2, col2, render2)
-                      in
-                        insertRender newupper newcol newrender accum'
+                    innerfold :: [Render] -> Render -> [Render]
+                    innerfold accum' = insertRender accum' . appendOne render1
                   in
                     -- Don't bother calling packResult here, we'll do
                     -- it at the end anyway.
-                    HashMap.foldlWithKey' innerfold accum opts2
+                    foldl innerfold accum opts2
           in
             -- Fold it up, then use packResult.
-            packResult (HashMap.foldlWithKey' outerfold HashMap.empty opts)
+            packResult (foldl outerfold [] opts)
 
         -- Build the first item
         firstres = buildDynamic sgr nesting ind first
@@ -1628,7 +1599,7 @@ buildOptimal maxcol ansiterm doc =
         s @ Single { singleRender = r } -> s { singleRender = updateRender r }
         -- Update all renders for a Multi.
         m @ Multi { multiOptions = opts } ->
-          m { multiOptions = HashMap.map updateRender opts }
+          m { multiOptions = map updateRender opts }
     buildDynamic sgr nesting ind Choose { chooseOptions = options } =
       let
         -- Build up all the components
@@ -1651,7 +1622,7 @@ buildOptimal maxcol ansiterm doc =
           s @ Single { singleRender = render } ->
             s { singleRender = wrapBuilder render }
           m @ Multi { multiOptions = opts } ->
-            m { multiOptions = HashMap.map wrapBuilder opts }
+            m { multiOptions = map wrapBuilder opts }
       -- Otherwise, skip it entirely
       | otherwise = buildDynamic sgr2 nesting ind inner
 

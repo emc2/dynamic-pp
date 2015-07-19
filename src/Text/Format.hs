@@ -1271,7 +1271,7 @@ makespaces n = fromLazyByteString (Lazy.Char8.replicate (fromIntegral n) ' ')
 -- Add a 'Render' into a result set, ensuring that any subsumed
 -- renders are dropped.
 --
--- XXX The asymptotic runtime of this could likely be improved by some
+-- TODO: The asymptotic runtime of this could likely be improved by some
 -- kind of tree structure; however, the design of this structure is
 -- nontrivial, due to the 3+-dimensional nature of subsumption, and
 -- the wierd interactions between the various kinds of column offsets.

@@ -86,6 +86,7 @@ module Text.Format(
        -- *** Derived
        nest,
        indent,
+       alignOffset,
        align,
        squoted,
        dquoted,
@@ -564,8 +565,12 @@ indent lvl doc = Nest { nestDelay = False, nestAlign = False,
 
 -- | Set the indentation level to the current column.
 align :: Doc -> Doc
-align inner = Nest { nestDelay = True, nestAlign = True,
-                     nestLevel = 0, nestDoc = inner }
+align = alignOffset 0
+
+alignOffset :: Int -> Doc -> Doc
+alignOffset offset inner = Nest { nestDelay = True, nestAlign = True,
+                                  nestLevel = offset, nestDoc = inner }
+
 
 -- | Enclose a 'Doc' in single quotes
 squoted :: Doc -> Doc

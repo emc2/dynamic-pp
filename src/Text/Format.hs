@@ -563,11 +563,17 @@ indent lvl n @ Nest { nestLevel = lvl' } = n { nestLevel = lvl + lvl' }
 indent lvl doc = Nest { nestDelay = False, nestAlign = False,
                         nestLevel = lvl, nestDoc = doc }
 
--- | Set the indentation level to the current column.
+-- | Set the indentation level to the current column.  This is
+-- equivalent to @alignOffset 0@.
 align :: Doc -> Doc
 align = alignOffset 0
 
-alignOffset :: Int -> Doc -> Doc
+-- | Set the indetation level to the current column, plus some offset.
+alignOffset :: Int
+            -- ^ Offset to current column.  Can be negative.
+            -> Doc
+            -- ^ The @Doc@ to align.
+            -> Doc
 alignOffset offset inner = Nest { nestDelay = True, nestAlign = True,
                                   nestLevel = offset, nestDoc = inner }
 

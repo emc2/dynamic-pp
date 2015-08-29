@@ -185,7 +185,7 @@ import Data.List(intersperse, minimumBy, sort)
 import Data.Maybe
 import Data.Monoid hiding ((<>))
 import Data.Word
-import Prelude hiding (concat)
+import Prelude hiding ((<$>), concat)
 import System.Console.ANSI
 import System.IO
 

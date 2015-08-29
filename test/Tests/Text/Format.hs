@@ -173,7 +173,7 @@ renderOptimalTests =
       Lazy.fromString "pre (inner(123\n           456)\n     hello\n     aaaa bbb)" @=?
       renderOptimal 15 False nesteddoc,
     "constructor_nested2" ~:
-      Lazy.fromString "pre (\n     helloinner(123\n           456)\n     aaaa bbb)" @=?
+      Lazy.fromString "pre (hello\n     inner(123\n           456)\n     aaaa bbb)" @=?
       renderOptimal 15 False nesteddoc2
   ]
 

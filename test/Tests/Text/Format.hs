@@ -40,7 +40,7 @@ import qualified Data.ByteString.Lazy.UTF8 as Lazy
 renderOptimalTests :: [Test]
 renderOptimalTests =
   let
-    innerstructdoc = string "inner (" <> align (string "123" </>
+    innerstructdoc = string "inner(" <> align (string "123" </>
                                                 string "456") <//>
                                          rparen
     structdoc = string "pre (" <> align (string "hello" </>

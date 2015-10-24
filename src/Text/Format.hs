@@ -162,12 +162,19 @@ module Text.Format(
        group,
 
        -- * Rendering @Doc@s
+       -- ** Single-Line Render
        renderOneLine,
        buildOneLine,
        putOneLine,
+       -- ** Fast Render
        renderFast,
        buildFast,
        putFast,
+       -- ** Greedy (Wadler-Leijin style) Render
+       renderGreedy,
+       buildGreedy,
+       putGreedy,
+       -- ** Optimal Render
        renderOptimal,
        buildOptimal,
        putOptimal
@@ -178,13 +185,13 @@ import Blaze.ByteString.Builder.Char.Utf8
 import Control.Arrow((***))
 import Control.Monad
 import Data.Hashable
-import Data.HashSet(HashSet)
+--import Data.HashSet(HashSet)
 --import Data.HashMap.Strict(HashMap)
 import Data.List(intersperse, minimumBy, sort)
 import Data.Maybe
 import Data.Monoid hiding ((<>))
 import Data.Word
-import Prelude hiding (concat)
+import Prelude hiding ((<$>), concat)
 import System.Console.ANSI
 import System.IO
 
@@ -194,7 +201,7 @@ import qualified Data.ByteString.Lazy as Lazy
 import qualified Data.ByteString.Lazy.Char8 as Lazy.Char8
 import qualified Data.ByteString.Lazy.UTF8 as Lazy.UTF8
 --import qualified Data.HashMap.Strict as HashMap
-import qualified Data.HashSet as HashSet
+--import qualified Data.HashSet as HashSet
 
 -- | Datatype representing a formatted document.
 
@@ -246,7 +253,7 @@ data Doc =
     -- | Choose the \"best\" from among a list of options.
   | Choose {
       -- | The list of options.
-      chooseOptions :: HashSet Doc
+      chooseOptions :: [Doc]
     }
     -- | Set graphics mode options when rendering the child @Doc@.
   | Graphics {
@@ -310,7 +317,7 @@ instance Ord Doc where
   compare Nest {} _ = LT
   compare _ Nest {} = GT
   compare Choose { chooseOptions = opts1 } Choose { chooseOptions = opts2 } =
-    compare (sort (HashSet.toList opts1)) (sort (HashSet.toList opts2))
+    compare opts1 opts2
   compare Choose {} _ = LT
   compare _ Choose {} = GT
   compare Graphics { graphicsSGR = sgr1, graphicsDoc = doc1 }
@@ -336,7 +343,7 @@ instance Hashable Doc where
     s `hashWithSalt` (4 :: Int) `hashWithSalt` lvl `hashWithSalt`
     al `hashWithSalt` delay `hashWithSalt` doc
   hashWithSalt s Choose { chooseOptions = opts } =
-    s `hashWithSalt` (5 :: Int) `hashWithSalt` sort (HashSet.toList opts)
+    s `hashWithSalt` (5 :: Int) `hashWithSalt` sort opts
   hashWithSalt s Graphics { graphicsSGR = sgr, graphicsDoc = doc } =
     s `hashWithSalt` (6 :: Int) `hashWithSalt` sgr `hashWithSalt` doc
 
@@ -445,12 +452,12 @@ hardline = Line { lineKind = Hard }
 -- | A 'Doc' consisting of a space character, that can be turned into
 -- a linebreak in order to break lines that are too long.
 softline :: Doc
-softline = Choose { chooseOptions = HashSet.fromList [ char ' ', linebreak ] }
+softline = Choose { chooseOptions = [ char ' ', linebreak ] }
 
 -- | An empty 'Doc' that can be turned into a linebreak in order to
 -- break lines that are too long.
 softbreak :: Doc
-softbreak = Choose { chooseOptions = HashSet.fromList [ empty, line ] }
+softbreak = Choose { chooseOptions = [ empty, line ] }
 
 -- | A 'Doc' containing a single character.
 char :: Char -> Doc
@@ -929,7 +936,7 @@ concat docs = Cat { catDocs = docs }
 choose :: [Doc] -> Doc
 choose [] = empty
 choose [doc] = doc
-choose docs = Choose { chooseOptions = HashSet.fromList docs }
+choose docs = Choose { chooseOptions = docs }
 
 -- | Concatenate a list of 'Doc's.  This is generally more efficient
 -- than repeatedly using 'beside' or '<>'.
@@ -953,11 +960,11 @@ vcat = concat . intersperse linebreak
 
 -- | Join a list of 'Doc's using either 'hsep' or 'vsep'.
 sep :: [Doc] -> Doc
-sep docs = Choose { chooseOptions = HashSet.fromList [hsep docs, vsep docs] }
+sep docs = Choose { chooseOptions = [hsep docs, vsep docs] }
 
 -- | Join a list of 'Doc's using either 'hcat' or 'vcat'.
 cat :: [Doc] -> Doc
-cat docs = Choose { chooseOptions = HashSet.fromList [hcat docs, vcat docs] }
+cat docs = Choose { chooseOptions = [hcat docs, vcat docs] }
 
 -- | Join a list of 'Doc's with 'softline's in between each.  This is
 -- generally more efficient than repeatedly using '</>'.
@@ -1003,9 +1010,9 @@ flatten Cat { catDocs = docs } =
     [] -> Nothing
     flatinner -> Just Cat { catDocs = flatinner }
 flatten Choose { chooseOptions = docs } =
-  case mapMaybe flatten (HashSet.toList docs) of
+  case mapMaybe flatten docs of
     [] -> Nothing
-    flatdocs -> Just Choose { chooseOptions = HashSet.fromList flatdocs }
+    flatdocs -> Just Choose { chooseOptions = flatdocs }
 flatten n @ Nest { nestDoc = inner } =
   do
     flatinner <- flatten inner
@@ -1016,7 +1023,7 @@ flatten doc = Just doc
 -- 'flatten'ed version of the argument.
 group :: Doc -> Doc
 group doc = case flatten doc of
-  Just flatdoc -> Choose { chooseOptions = HashSet.fromList [ doc, flatdoc ] }
+  Just flatdoc -> Choose { chooseOptions = [ doc, flatdoc ] }
   Nothing -> doc
 
 -- | Produce a 'Builder' that renders the 'Doc' to one line.
@@ -1028,8 +1035,7 @@ buildOneLine Line { lineKind = Soft } = mempty
 buildOneLine Line { lineKind = Hard } = fromChar '\n'
 buildOneLine Cat { catDocs = docs } = mconcat (map buildOneLine docs)
 buildOneLine Nest { nestDoc = inner } = buildOneLine inner
-buildOneLine Choose { chooseOptions = opts } =
-  buildOneLine (head (HashSet.toList opts))
+buildOneLine Choose { chooseOptions = opts } = buildOneLine (head opts)
 buildOneLine Graphics { graphicsDoc = inner } = buildOneLine inner
 
 -- | Render the entire 'Doc' to one line.  Good for output that
@@ -1050,8 +1056,7 @@ buildFast Content { contentString = builder } = fromLazyByteString builder
 buildFast Line {} = fromChar '\n'
 buildFast Cat { catDocs = docs } = mconcat (map buildFast docs)
 buildFast Nest { nestDoc = inner } = buildFast inner
-buildFast Choose { chooseOptions = opts } =
-  buildFast (head (HashSet.toList opts))
+buildFast Choose { chooseOptions = opts } = buildFast (head opts)
 buildFast Graphics { graphicsDoc = inner } = buildFast inner
 
 -- | Render the entire 'Doc', preserving newlines, but without any
@@ -1400,6 +1405,173 @@ contentBuilder Partial builder nesting col =
 -- Otherwise, do nothing.
 contentBuilder None builder _ _ = builder
 
+-- | Produce a 'Builder' that renders the 'Doc' using the greedy
+-- layout engine.
+buildGreedy :: Int
+             -- ^ The maximum number of columns.
+             -> Bool
+             -- ^ Whether or not to render with ANSI terminal options.
+             -> Doc
+             -- ^ The document to render.
+             -> Builder
+buildGreedy maxcol ansiterm doc =
+
+  let
+    -- This uses pretty much the same framework as the optimal
+    -- renderer, but without the frontier.
+    build :: Graphics -> Column -> Indent -> Doc -> Render
+    -- For char, bytestring, and lazy bytestring,
+    build _ _ ind Char { charContent = chr } =
+      let
+        -- Why would you have maxcol == 0?  Who knows, but check for it.
+        overrun = if maxcol >= 1 then Relative 0 else Relative (maxcol - 1)
+        builder = contentBuilder ind (fromChar chr)
+      in
+        -- Single characters have a single possibility, a relative
+        -- ending position one beyond the start, and an upper-bound
+        -- one shorter than the maximum width.
+        Render { renderOverrun = overrun, renderIndent = None,
+                 renderBuilder = builder, renderCol = Relative 1,
+                 renderLines = 0, renderUpper = maxcol - 1 }
+    build _ _ ind Content { contentString = txt, contentLength = len } =
+      let
+        -- Why would you have maxcol == 0?  Who knows, but check for it.
+        overrun = if maxcol >= len then Relative 0 else Relative (len - maxcol)
+        builder = contentBuilder ind (fromLazyByteString txt)
+      in
+        -- Text has a single possibility and a relative ending position
+        -- equal to its length
+       Render { renderLines = 0, renderUpper = maxcol - len,
+                renderBuilder = builder, renderCol = Relative len,
+                renderIndent = None, renderOverrun = overrun }
+    build _ nesting _ Line {} =
+      -- A newline starts at the nesting level, has no overrun, and an
+      -- upper-bound equal to the maximum column width.
+      --
+      -- Note: the upper bound is adjusted elsewhere.
+      Render { renderOverrun = Fixed { fixedOffset = 0 },
+               renderIndent = Full, renderLines = 1,
+               renderBuilder = const $! const $! fromChar '\n',
+               renderCol = nesting, renderUpper = maxcol }
+    build _ _ ind Cat { catDocs = [] } =
+      -- The empty document has no content, no overrun, a relative end
+      -- position of 0, and an upper-bound of maxcol.
+      Render { renderOverrun = Fixed 0, renderIndent = ind,
+               renderLines = 0, renderBuilder = const mempty,
+               renderCol = Relative 0, renderUpper = maxcol }
+    build sgr nesting ind Cat { catDocs = first : rest } =
+      let
+        -- Glue two Results together.  This gets used in a fold.
+        appendResults :: Render -> Doc -> Render
+        -- The accumulated result is a Single.
+        appendResults render1 @ Render { renderIndent = ind' } doc' =
+          let
+            -- Render the document.
+            render2 = build sgr nesting ind' doc'
+          in
+            appendOne render1 render2
+
+        -- Build the first item
+        firstres = build sgr nesting ind first
+      in
+        -- Fold them all together with appendResults
+        foldl appendResults firstres rest
+    build sgr nesting ind Nest { nestDelay = delay, nestDoc = inner,
+                                 nestAlign = alignnest,
+                                 nestLevel = lvl } =
+      let
+        -- Wrap up the render functions in code that alters the
+        -- nesting and column numbers.
+        updateRender =
+          if alignnest
+            -- If we're relative to the current column, then make the
+            -- new nesting equal to the current column, plus an
+            -- offset.
+            then \r @ Render { renderBuilder = builder } ->
+                   r { renderBuilder = \_ c -> builder (c + lvl) c }
+            -- Otherwise, make it relative to the current nesting level.
+            else \r @ Render { renderBuilder = builder } ->
+                   r { renderBuilder = \n c -> builder (n + lvl) c }
+
+        -- If we delay the indentation, don't alter the indent mode,
+        -- otherwise, set it.
+        newindent = if delay then ind else Partial
+
+        res =
+          if alignnest
+            -- If we're aligning to the current column, the nesting
+            -- becomes a relative offset.
+            then build sgr (Relative lvl) newindent inner
+            -- Otherwise, we have to update the nesting level.
+            else
+              let
+                -- Basically, increment everything by the nesting level.
+                newnesting = case nesting of
+                  Fixed { fixedOffset = n } -> Fixed { fixedOffset = n + lvl }
+                  Relative { relOffset = n } -> Relative { relOffset = n + lvl }
+                  Maximum { maxFixed = fixed, maxRelative = rel } ->
+                    Maximum { maxFixed = fixed + lvl, maxRelative = rel + lvl }
+              in
+                build sgr newnesting newindent inner
+      in
+        updateRender res
+    build sgr nesting ind Choose { chooseOptions = options } =
+      let
+        greedy [] = error "Should not see empty Choose"
+        greedy [only] = build sgr nesting ind only
+        greedy (first : rest) =
+          let
+            r @ Render { renderUpper = upper } = build sgr nesting ind first
+          in
+            if upper > 0 then r else greedy rest
+      in
+        greedy options
+    build sgr1 nesting ind Graphics { graphicsSGR = sgr2, graphicsDoc = inner }
+      -- Only do graphics if the ansiterm flag is set.
+      | ansiterm =
+        let
+          r @ Render { renderBuilder = builder } = build sgr2 nesting ind inner
+        in
+          -- Insert graphics control characters without updating
+          -- column numbers, as they aren't visible.
+         r { renderBuilder = \n c -> switchGraphics sgr1 sgr2 `mappend`
+                                     builder n c `mappend`
+                                     switchGraphics sgr2 sgr1 }
+      -- Otherwise, skip it entirely
+      | otherwise = build sgr2 nesting ind inner
+
+    -- Call build, extract the result.
+    Render { renderBuilder = result } =
+      build Default Fixed { fixedOffset = 0 } None doc
+  in
+    result 0 0
+
+-- | Render a 'Doc' as a lazy bytestring using a greedy layout
+-- rendering engine.  This engine is roughly equivalent to the
+-- Wadler-Leijin layout engine.
+renderGreedy :: Int
+              -- ^ The maximum number of columns.
+              -> Bool
+              -- ^ Whether or not to render with ANSI terminal options.
+              -> Doc
+              -- ^ The document to render.
+              -> Lazy.ByteString
+renderGreedy cols color = toLazyByteString . buildGreedy cols color
+
+-- | Output the entire 'Doc', as rendered by 'renderGreedy' to the
+-- given 'Handle'.
+putGreedy :: Handle
+           -- ^ The 'Handle' to which to write output
+           -> Int
+           -- ^ The maximum number of columns.
+           -> Bool
+           -- ^ Whether or not to render with ANSI terminal options.
+           -> Doc
+           -- ^ The document to render.
+           -> IO ()
+putGreedy handle cols color =
+  toByteStringIO (Strict.hPut handle) . buildGreedy cols color
+
 -- | Produce a 'Builder' that renders the 'Doc' using the optimal
 -- layout engine.
 
@@ -1426,9 +1598,9 @@ buildOptimal :: Int
              -> Builder
 buildOptimal maxcol ansiterm doc =
   let
-    buildDynamic :: Graphics -> Column -> Indent -> Doc -> Result
+    build :: Graphics -> Column -> Indent -> Doc -> Result
     -- For char, bytestring, and lazy bytestring,
-    buildDynamic _ _ ind Char { charContent = chr } =
+    build _ _ ind Char { charContent = chr } =
       let
         -- Why would you have maxcol == 0?  Who knows, but check for it.
         overrun = if maxcol >= 1 then Relative 0 else Relative (maxcol - 1)
@@ -1441,7 +1613,7 @@ buildOptimal maxcol ansiterm doc =
                     Render { renderOverrun = overrun, renderIndent = None,
                              renderBuilder = builder, renderCol = Relative 1,
                              renderLines = 0, renderUpper = maxcol - 1 } }
-    buildDynamic _ _ ind Content { contentString = txt, contentLength = len } =
+    build _ _ ind Content { contentString = txt, contentLength = len } =
       let
         -- Why would you have maxcol == 0?  Who knows, but check for it.
         overrun = if maxcol >= len then Relative 0 else Relative (len - maxcol)
@@ -1453,7 +1625,7 @@ buildOptimal maxcol ansiterm doc =
                    Render { renderLines = 0, renderUpper = maxcol - len,
                             renderBuilder = builder, renderCol = Relative len,
                             renderIndent = None, renderOverrun = overrun } }
-    buildDynamic _ nesting _ Line {} =
+    build _ nesting _ Line {} =
       -- A newline starts at the nesting level, has no overrun, and an
       -- upper-bound equal to the maximum column width.
       --
@@ -1465,14 +1637,14 @@ buildOptimal maxcol ansiterm doc =
                                                 fromChar '\n',
                                 renderCol = nesting, renderUpper = maxcol } }
     -- This is for an empty cat, ie. the empty document
-    buildDynamic _ _ ind Cat { catDocs = [] } =
+    build _ _ ind Cat { catDocs = [] } =
       -- The empty document has no content, no overrun, a relative end
       -- position of 0, and an upper-bound of maxcol.
       Single {
         singleRender = Render { renderOverrun = Fixed 0, renderIndent = ind,
                                 renderLines = 0, renderBuilder = const mempty,
                                 renderCol = Relative 0, renderUpper = maxcol } }
-    buildDynamic sgr nesting ind Cat { catDocs = first : rest } =
+    build sgr nesting ind Cat { catDocs = first : rest } =
       let
         -- Glue two Results together.  This gets used in a fold.
         appendResults :: Result -> Doc -> Result
@@ -1481,7 +1653,7 @@ buildOptimal maxcol ansiterm doc =
                                   render1 @ Render { renderIndent = ind' } }
                       doc' =
           -- Render the document.
-          case buildDynamic sgr nesting ind' doc' of
+          case build sgr nesting ind' doc' of
             -- If there's a single result, it's easy; just use appendOne.
             Single { singleRender = render2  } ->
               let
@@ -1507,7 +1679,7 @@ buildOptimal maxcol ansiterm doc =
             -- gluing on the next render.
             outerfold :: [Render] -> Render -> [Render]
             outerfold accum render1 @ Render { renderIndent = ind' } =
-              case buildDynamic sgr nesting ind' doc' of
+              case build sgr nesting ind' doc' of
                 -- If the render is a single result, then just glue it
                 -- on to the current option.
                 Single { singleRender = render2 } ->
@@ -1529,13 +1701,13 @@ buildOptimal maxcol ansiterm doc =
             packResult (foldl outerfold [] opts)
 
         -- Build the first item
-        firstres = buildDynamic sgr nesting ind first
+        firstres = build sgr nesting ind first
       in
         -- Fold them all together with appendResults
         foldl appendResults firstres rest
-    buildDynamic sgr nesting ind Nest { nestDelay = delay, nestDoc = inner,
-                                        nestAlign = alignnest,
-                                        nestLevel = lvl } =
+    build sgr nesting ind Nest { nestDelay = delay, nestDoc = inner,
+                                 nestAlign = alignnest,
+                                 nestLevel = lvl } =
       let
         -- Wrap up the render functions in code that alters the
         -- nesting and column numbers.
@@ -1558,7 +1730,7 @@ buildOptimal maxcol ansiterm doc =
           if alignnest
             -- If we're aligning to the current column, the nesting
             -- becomes a relative offset.
-            then buildDynamic sgr (Relative lvl) newindent inner
+            then build sgr (Relative lvl) newindent inner
             -- Otherwise, we have to update the nesting level.
             else
               let
@@ -1569,42 +1741,41 @@ buildOptimal maxcol ansiterm doc =
                   Maximum { maxFixed = fixed, maxRelative = rel } ->
                     Maximum { maxFixed = fixed + lvl, maxRelative = rel + lvl }
               in
-                buildDynamic sgr newnesting newindent inner
+                build sgr newnesting newindent inner
       in case res of
         -- Update the render for a Single.
         s @ Single { singleRender = r } -> s { singleRender = updateRender r }
         -- Update all renders for a Multi.
         m @ Multi { multiOptions = opts } ->
           m { multiOptions = map updateRender opts }
-    buildDynamic sgr nesting ind Choose { chooseOptions = options } =
+    build sgr nesting ind Choose { chooseOptions = options } =
       let
         -- Build up all the components
-        results = map (buildDynamic sgr nesting ind) (HashSet.toList options)
+        results = map (build sgr nesting ind) options
       in
         -- Now merge them into an minimal set of options
         foldl1 mergeResults results
-    buildDynamic sgr1 nesting ind Graphics { graphicsSGR = sgr2,
-                                             graphicsDoc = inner }
+    build sgr1 nesting ind Graphics { graphicsSGR = sgr2, graphicsDoc = inner }
       -- Only do graphics if the ansiterm flag is set.
       | ansiterm =
         let
           -- Insert graphics control characters without updating
           -- column numbers, as they aren't visible.
-          wrapBuilder r @ Render { renderBuilder = build } =
+          wrapBuilder r @ Render { renderBuilder = builder } =
             r { renderBuilder = \n c -> switchGraphics sgr1 sgr2 `mappend`
-                                        build n c `mappend`
+                                        builder n c `mappend`
                                         switchGraphics sgr2 sgr1 }
-        in case buildDynamic sgr2 nesting ind inner of
+        in case build sgr2 nesting ind inner of
           s @ Single { singleRender = render } ->
             s { singleRender = wrapBuilder render }
           m @ Multi { multiOptions = opts } ->
             m { multiOptions = map wrapBuilder opts }
       -- Otherwise, skip it entirely
-      | otherwise = buildDynamic sgr2 nesting ind inner
+      | otherwise = build sgr2 nesting ind inner
 
-    -- Call buildDynamic, get the result, then pick the best one.
+    -- Call build, get the result, then pick the best one.
     Render { renderBuilder = result } =
-      case buildDynamic Default Fixed { fixedOffset = 0 } None doc of
+      case build Default Fixed { fixedOffset = 0 } None doc of
         Single { singleRender = render } -> render
         Multi opts -> bestRenderInOpts opts
   in

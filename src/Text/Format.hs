@@ -86,6 +86,7 @@ module Text.Format(
        -- *** Derived
        nest,
        indent,
+       alignOffset,
        align,
        squoted,
        dquoted,
@@ -203,6 +204,12 @@ import qualified Data.ByteString.Lazy.UTF8 as Lazy.UTF8
 --import qualified Data.HashMap.Strict as HashMap
 --import qualified Data.HashSet as HashSet
 
+--import Debug.Trace
+
+debug :: String -> a -> a
+--debug = trace
+debug _ = id
+
 -- | Datatype representing a formatted document.
 
 data LineKind =
@@ -212,7 +219,7 @@ data LineKind =
   | Soft
     -- | Linebreak replaced with a space
   | Break
-    deriving (Ord, Eq, Enum)
+    deriving (Ord, Eq, Enum, Show)
 
 -- Docs are organized into a tree structure whose nodes dictate the
 -- formatting of the generated text.  These are rendered by the
@@ -262,7 +269,7 @@ data Doc =
       -- | Document to render with graphic mode.
       graphicsDoc :: Doc
     }
-    deriving (Eq)
+    deriving (Eq, Show)
 
 -- | Graphics options for ANSI terminals.  All options are wrapped in
 -- the 'Maybe' datatype, with 'Nothing' meaning \"leave this option
@@ -286,7 +293,7 @@ data Graphics =
     }
     -- | Reset the terminal in this mode.
   | Default
-    deriving (Ord, Eq)
+    deriving (Ord, Eq, Show)
 
 instance Ord Doc where
   compare Char { charContent = c1 } Char { charContent = c2 } = compare c1 c2
@@ -569,10 +576,20 @@ indent lvl n @ Nest { nestLevel = lvl' } = n { nestLevel = lvl + lvl' }
 indent lvl doc = Nest { nestDelay = False, nestAlign = False,
                         nestLevel = lvl, nestDoc = doc }
 
--- | Set the indentation level to the current column.
+-- | Set the indentation level to the current column.  This is
+-- equivalent to @alignOffset 0@.
 align :: Doc -> Doc
-align inner = Nest { nestDelay = True, nestAlign = True,
-                     nestLevel = 0, nestDoc = inner }
+align = alignOffset 0
+
+-- | Set the indetation level to the current column, plus some offset.
+alignOffset :: Int
+            -- ^ Offset to current column.  Can be negative.
+            -> Doc
+            -- ^ The @Doc@ to align.
+            -> Doc
+alignOffset offset inner = Nest { nestDelay = True, nestAlign = True,
+                                  nestLevel = offset, nestDoc = inner }
+
 
 -- | Enclose a 'Doc' in single quotes
 squoted :: Doc -> Doc
@@ -1092,14 +1109,14 @@ data Column =
     }
     deriving Show
 
--- | The indentation mode.
-data Indent =
-    -- | Indent starting with the zero column.
-    Full
-    -- | Indent starting with the current column.
-  | Partial
-    -- | No indent.
-  | None
+-- | A description of the ending.
+data Ending =
+    -- | Ended with a newline, so do a full indent
+    Newline
+    -- | Ended with an indent, so do a partial indent
+  | Indent
+    -- | Ended with ordinary content.
+  | Normal
     deriving Show
 
 instance Hashable Column where
@@ -1159,37 +1176,6 @@ instance Ord Column where
 instance Eq Column where
   c1 == c2 = compare c1 c2 == EQ
 
--- | Given a starting column and an ending column, give a column
--- representing the combination of the two.
-advance :: Column -> Column -> Column
--- If the second column is fixed, it doesn't matter what the first is.
-advance _ f @ Fixed {} = f
--- If the first is fixed and the second is relative, then advance the
--- first by the relative offset.
-advance Fixed { fixedOffset = start } Relative { relOffset = n } =
-  Fixed { fixedOffset = start + n }
--- If the first is fixed and the second is a maximum, then we can
--- figure out which is the larger.
-advance Fixed { fixedOffset = start }
-        Maximum { maxFixed = fixed, maxRelative = rel } =
-  Fixed { fixedOffset = max fixed (start + rel) }
--- If both are relative, just add them and make a new relative.
-advance Relative { relOffset = start } Relative { relOffset = n } =
-  Relative { relOffset = start + n }
--- If we combine a relative and a maximum, then add the relative
--- offset to the relative portion of the maximum
-advance Relative { relOffset = start } m @ Maximum { maxRelative = n } =
-  m { maxRelative = start + n }
-advance m @ Maximum { maxRelative = rel } Relative { relOffset = n } =
-  m { maxRelative = rel + n }
--- If both are a maximum, then the resulting relative portion is the
--- sum of the two relative portions.  The resulting fixed portion is
--- the greater of the second fixed portion, or the first fixed portion
--- plus the second relative portion.
-advance Maximum { maxFixed = fixed1, maxRelative = rel1 }
-        Maximum { maxFixed = fixed2, maxRelative = rel2 } =
-  Maximum { maxFixed = max fixed2 (fixed1 + rel2), maxRelative = rel1 + rel2 }
-
 -- | A rendering of a document.
 -- Renderings store three basic things: A notion of the "badness" of
 -- this particular rendering (represented by the overrun and the
@@ -1210,8 +1196,18 @@ data Render =
     -- | A builder that constructs the document.
     renderBuilder :: !(Int -> Int -> Builder),
     -- | Indentation mode for the next document.
-    renderIndent :: !Indent
+    renderEnding :: !Ending
   }
+
+instance Show Render where
+  show Render { renderUpper = upper, renderCol = col, renderLines = lns,
+                renderOverrun = overrun, renderBuilder = builder,
+                renderEnding = end } =
+    "Render { renderUpper = " ++ show upper ++ ", renderCol = " ++ show col ++
+    ", renderLines = " ++ show lns ++ ", renderOverrun = " ++ show overrun ++
+    ", renderBuilder = " ++ show (toLazyByteString (builder 0 0)) ++
+    ", renderIndent = " ++ show end ++
+    " }"
 
 -- | Determine whether the first 'Render' is strictly better than the second.
 subsumes :: Render -> Render -> Bool
@@ -1314,11 +1310,14 @@ bestRenderInOpts =
 -- the contents of an entry in a Multi combined with the corresponding
 -- key).
 appendOne :: Render -> Render -> Render
+appendOne r1 r2
+  | debug ("appendOne\n  " ++ show r1 ++ "\n  " ++ show r2 ++ " =") False =
+    undefined
 appendOne Render { renderUpper = upper1, renderLines = lines1, renderCol = col1,
                    renderOverrun = overrun1, renderBuilder = build1 }
           Render { renderUpper = upper2, renderLines = lines2, renderCol = col2,
                    renderOverrun = overrun2, renderBuilder = build2,
-                   renderIndent = ind } =
+                   renderEnding = end } =
   let
     -- The new build is completely determined by the first render's
     -- starting column.
@@ -1362,15 +1361,50 @@ appendOne Render { renderUpper = upper1, renderLines = lines1, renderCol = col1,
         then Relative { relOffset = abs newupper }
         else Fixed { fixedOffset = 0 }
 
-  in
-    Render { renderBuilder = newbuild, renderIndent = ind,
-             renderLines = lines1 + lines2, renderUpper = newupper,
-             -- For the new overrun, take the max of the existing
-             -- overruns and newoverrun
-             renderOverrun = max (max overrun1 overrun2) newoverrun,
-             -- For the new column, use advance
-             renderCol = col1 `advance` col2 }
+    newcol = case (col1, col2, end) of
+      -- If the second column is fixed, it doesn't matter what the first is.
+      (_, f @ Fixed {}, _) -> f
+      -- If the second document ends with a newline, then we ignore
+      -- the first document's column entirely.
+      (_, r, Newline) -> r
+      -- If the first is fixed and the second is relative, then
+      -- advance the first by the relative offset, unless the first
+      -- document ends with a line.
+      (Fixed { fixedOffset = start }, Relative { relOffset = n }, _) ->
+        Fixed { fixedOffset = start + n }
+      -- If the first is fixed and the second is a maximum, then we can
+      -- figure out which is the larger.
+      (Fixed { fixedOffset = start }, Maximum { maxFixed = fixed,
+                                                maxRelative = rel }, _) ->
+        Fixed { fixedOffset = max fixed (start + rel) }
+      -- If both are relative, just add them and make a new relative.
+      (Relative { relOffset = start }, Relative { relOffset = n }, _) ->
+        Relative { relOffset = start + n }
+      -- If we combine a relative and a maximum, then add the relative
+      -- offset to the relative portion of the maximum
+      (Relative { relOffset = start }, m @ Maximum { maxRelative = n }, _) ->
+        m { maxRelative = start + n }
+      (m @ Maximum { maxRelative = rel }, Relative { relOffset = n }, _) ->
+        m { maxRelative = rel + n }
+      -- If both are a maximum, then the resulting relative portion is the
+      -- sum of the two relative portions.  The resulting fixed portion is
+      -- the greater of the second fixed portion, or the first fixed portion
+      -- plus the second relative portion.
+      (Maximum { maxFixed = fixed1, maxRelative = rel1 },
+       Maximum { maxFixed = fixed2, maxRelative = rel2 }, _) ->
+        Maximum { maxFixed = max fixed2 (fixed1 + rel2),
+                  maxRelative = rel1 + rel2 }
 
+    out = Render { renderBuilder = newbuild, renderEnding = end,
+                   renderLines = lines1 + lines2, renderUpper = newupper,
+                   -- For the new overrun, take the max of the existing
+                   -- overruns and newoverrun
+                   renderOverrun = max (max overrun1 overrun2) newoverrun,
+                   -- For the new column, use advance
+                   renderCol = newcol }
+
+  in
+    debug ("    " ++ show out ++ "\n\n") out
 -- | Combine two results into a Multi.  This achieves the same result
 -- as HashMap.unionWith bestRender (meaning, union these maps,
 -- combining using bestRender to pick when both maps have a given
@@ -1393,17 +1427,17 @@ mergeResults Multi { multiOptions = opts1 } Multi { multiOptions = opts2 } =
 
 -- Add indentation on to a builder.  Note, this is used to create the
 -- builder functions used in Render.
-contentBuilder :: Indent -> Builder -> Int -> Int -> Builder
+contentBuilder :: Ending -> Builder -> Int -> Int -> Builder
 -- For full indentation, glue on the full indent
-contentBuilder Full builder nesting _ =
+contentBuilder Newline builder nesting _ =
   makespaces nesting `mappend` builder
 -- For partial indentation, bring us up to the current indent level
-contentBuilder Partial builder nesting col =
+contentBuilder Indent builder nesting col =
   if col < nesting
     then makespaces (nesting - col) `mappend` builder
     else builder
 -- Otherwise, do nothing.
-contentBuilder None builder _ _ = builder
+contentBuilder Normal builder _ _ = builder
 
 -- | Produce a 'Builder' that renders the 'Doc' using the greedy
 -- layout engine.
@@ -1419,7 +1453,7 @@ buildGreedy maxcol ansiterm doc =
   let
     -- This uses pretty much the same framework as the optimal
     -- renderer, but without the frontier.
-    build :: Graphics -> Column -> Indent -> Doc -> Render
+    build :: Graphics -> Column -> Ending -> Doc -> Render
     -- For char, bytestring, and lazy bytestring,
     build _ _ ind Char { charContent = chr } =
       let
@@ -1430,7 +1464,7 @@ buildGreedy maxcol ansiterm doc =
         -- Single characters have a single possibility, a relative
         -- ending position one beyond the start, and an upper-bound
         -- one shorter than the maximum width.
-        Render { renderOverrun = overrun, renderIndent = None,
+        Render { renderOverrun = overrun, renderEnding = Normal,
                  renderBuilder = builder, renderCol = Relative 1,
                  renderLines = 0, renderUpper = maxcol - 1 }
     build _ _ ind Content { contentString = txt, contentLength = len } =
@@ -1443,20 +1477,20 @@ buildGreedy maxcol ansiterm doc =
         -- equal to its length
        Render { renderLines = 0, renderUpper = maxcol - len,
                 renderBuilder = builder, renderCol = Relative len,
-                renderIndent = None, renderOverrun = overrun }
+                renderEnding = Normal, renderOverrun = overrun }
     build _ nesting _ Line {} =
       -- A newline starts at the nesting level, has no overrun, and an
       -- upper-bound equal to the maximum column width.
       --
       -- Note: the upper bound is adjusted elsewhere.
       Render { renderOverrun = Fixed { fixedOffset = 0 },
-               renderIndent = Full, renderLines = 1,
+               renderEnding = Newline, renderLines = 1,
                renderBuilder = const $! const $! fromChar '\n',
                renderCol = nesting, renderUpper = maxcol }
-    build _ _ ind Cat { catDocs = [] } =
+    build _ _ end Cat { catDocs = [] } =
       -- The empty document has no content, no overrun, a relative end
       -- position of 0, and an upper-bound of maxcol.
-      Render { renderOverrun = Fixed 0, renderIndent = ind,
+      Render { renderOverrun = Fixed 0, renderEnding = end,
                renderLines = 0, renderBuilder = const mempty,
                renderCol = Relative 0, renderUpper = maxcol }
     build sgr nesting ind Cat { catDocs = first : rest } =
@@ -1464,10 +1498,10 @@ buildGreedy maxcol ansiterm doc =
         -- Glue two Results together.  This gets used in a fold.
         appendResults :: Render -> Doc -> Render
         -- The accumulated result is a Single.
-        appendResults render1 @ Render { renderIndent = ind' } doc' =
+        appendResults render1 @ Render { renderEnding = end' } doc' =
           let
             -- Render the document.
-            render2 = build sgr nesting ind' doc'
+            render2 = build sgr nesting end' doc'
           in
             appendOne render1 render2
 
@@ -1495,7 +1529,7 @@ buildGreedy maxcol ansiterm doc =
 
         -- If we delay the indentation, don't alter the indent mode,
         -- otherwise, set it.
-        newindent = if delay then ind else Partial
+        newindent = if delay then ind else Indent
 
         res =
           if alignnest
@@ -1542,7 +1576,7 @@ buildGreedy maxcol ansiterm doc =
 
     -- Call build, extract the result.
     Render { renderBuilder = result } =
-      build Default Fixed { fixedOffset = 0 } None doc
+      build Default Fixed { fixedOffset = 0 } Normal doc
   in
     result 0 0
 
@@ -1598,7 +1632,7 @@ buildOptimal :: Int
              -> Builder
 buildOptimal maxcol ansiterm doc =
   let
-    build :: Graphics -> Column -> Indent -> Doc -> Result
+    build :: Graphics -> Column -> Ending -> Doc -> Result
     -- For char, bytestring, and lazy bytestring,
     build _ _ ind Char { charContent = chr } =
       let
@@ -1610,7 +1644,7 @@ buildOptimal maxcol ansiterm doc =
         -- ending position one beyond the start, and an upper-bound
         -- one shorter than the maximum width.
         Single { singleRender =
-                    Render { renderOverrun = overrun, renderIndent = None,
+                    Render { renderOverrun = overrun, renderEnding = Normal,
                              renderBuilder = builder, renderCol = Relative 1,
                              renderLines = 0, renderUpper = maxcol - 1 } }
     build _ _ ind Content { contentString = txt, contentLength = len } =
@@ -1624,7 +1658,7 @@ buildOptimal maxcol ansiterm doc =
        Single { singleRender =
                    Render { renderLines = 0, renderUpper = maxcol - len,
                             renderBuilder = builder, renderCol = Relative len,
-                            renderIndent = None, renderOverrun = overrun } }
+                            renderEnding = Normal, renderOverrun = overrun } }
     build _ nesting _ Line {} =
       -- A newline starts at the nesting level, has no overrun, and an
       -- upper-bound equal to the maximum column width.
@@ -1632,28 +1666,28 @@ buildOptimal maxcol ansiterm doc =
       -- Note: the upper bound is adjusted elsewhere.
       Single {
         singleRender = Render { renderOverrun = Fixed { fixedOffset = 0 },
-                                renderIndent = Full, renderLines = 1,
+                                renderEnding = Newline, renderLines = 1,
                                 renderBuilder = const $! const $!
                                                 fromChar '\n',
                                 renderCol = nesting, renderUpper = maxcol } }
     -- This is for an empty cat, ie. the empty document
-    build _ _ ind Cat { catDocs = [] } =
+    build _ _ end Cat { catDocs = [] } =
       -- The empty document has no content, no overrun, a relative end
       -- position of 0, and an upper-bound of maxcol.
       Single {
-        singleRender = Render { renderOverrun = Fixed 0, renderIndent = ind,
+        singleRender = Render { renderOverrun = Fixed 0, renderEnding = end,
                                 renderLines = 0, renderBuilder = const mempty,
                                 renderCol = Relative 0, renderUpper = maxcol } }
-    build sgr nesting ind Cat { catDocs = first : rest } =
+    build sgr nesting end Cat { catDocs = first : rest } =
       let
         -- Glue two Results together.  This gets used in a fold.
         appendResults :: Result -> Doc -> Result
         -- The accumulated result is a Single.
         appendResults Single { singleRender =
-                                  render1 @ Render { renderIndent = ind' } }
+                                  render1 @ Render { renderEnding = end' } }
                       doc' =
           -- Render the document.
-          case build sgr nesting ind' doc' of
+          case build sgr nesting end' doc' of
             -- If there's a single result, it's easy; just use appendOne.
             Single { singleRender = render2  } ->
               let
@@ -1678,8 +1712,8 @@ buildOptimal maxcol ansiterm doc =
             -- Outer fold, over each option in the accumulated result,
             -- gluing on the next render.
             outerfold :: [Render] -> Render -> [Render]
-            outerfold accum render1 @ Render { renderIndent = ind' } =
-              case build sgr nesting ind' doc' of
+            outerfold accum render1 @ Render { renderEnding = end' } =
+              case build sgr nesting end' doc' of
                 -- If the render is a single result, then just glue it
                 -- on to the current option.
                 Single { singleRender = render2 } ->
@@ -1701,7 +1735,7 @@ buildOptimal maxcol ansiterm doc =
             packResult (foldl outerfold [] opts)
 
         -- Build the first item
-        firstres = build sgr nesting ind first
+        firstres = build sgr nesting end first
       in
         -- Fold them all together with appendResults
         foldl appendResults firstres rest
@@ -1724,7 +1758,7 @@ buildOptimal maxcol ansiterm doc =
 
         -- If we delay the indentation, don't alter the indent mode,
         -- otherwise, set it.
-        newindent = if delay then ind else Partial
+        newindent = if delay then ind else Indent
 
         res =
           if alignnest
@@ -1737,7 +1771,10 @@ buildOptimal maxcol ansiterm doc =
                 -- Basically, increment everything by the nesting level.
                 newnesting = case nesting of
                   Fixed { fixedOffset = n } -> Fixed { fixedOffset = n + lvl }
-                  Relative { relOffset = n } -> Relative { relOffset = n + lvl }
+                  Relative { relOffset = n } ->
+                    if alignnest
+                      then Relative { relOffset = lvl }
+                      else Relative { relOffset = n + lvl }
                   Maximum { maxFixed = fixed, maxRelative = rel } ->
                     Maximum { maxFixed = fixed + lvl, maxRelative = rel + lvl }
               in
@@ -1775,7 +1812,7 @@ buildOptimal maxcol ansiterm doc =
 
     -- Call build, get the result, then pick the best one.
     Render { renderBuilder = result } =
-      case build Default Fixed { fixedOffset = 0 } None doc of
+      case build Default Fixed { fixedOffset = 0 } Normal doc of
         Single { singleRender = render } -> render
         Multi opts -> bestRenderInOpts opts
   in

@@ -38,7 +38,27 @@ import qualified Data.ByteString.Lazy.Char8 as Lazy
 import qualified Data.ByteString.Lazy.UTF8 as Lazy
 
 renderOptimalTests :: [Test]
-renderOptimalTests = [
+renderOptimalTests =
+  let
+    innerstructdoc = string "inner(" <> align (string "123" </>
+                                                string "456") <//>
+                                         rparen
+    structdoc = string "pre (" <> align (string "hello" </>
+                                         string "world" <!>
+                                         string "aaaa" </>
+                                         string "bbb") <//>
+                                  rparen
+    nesteddoc = string "pre (" <> align (innerstructdoc </>
+                                         string "hello" <!>
+                                         string "aaaa" </>
+                                         string "bbb") <//>
+                                  rparen
+    nesteddoc2 = string "pre (" <> align (string "hello" </>
+                                          innerstructdoc <!>
+                                          string "aaaa" </>
+                                          string "bbb") <//>
+                                   rparen
+  in [
     "empty" ~: Lazy.empty @=? renderOptimal 1 False empty,
     "char" ~: Lazy.singleton 'a' @=? renderOptimal 1 False (char 'a'),
     "string" ~: Lazy.fromString "hello" @=?
@@ -62,6 +82,14 @@ renderOptimalTests = [
       renderOptimal 1 False (string "hello" <>
                              align (line <> string "world" <>
                                     align (line <> string "today"))),
+    "align_text_break" ~: Lazy.fromString "hello world\n     today" @=?
+      renderOptimal 1 False (string "hello" <>
+                             align (char ' ' <> string "world" <!>
+                                    string "today")),
+    "align_text_break_nest" ~: Lazy.fromString "hello world\n       today" @=?
+      renderOptimal 1 False (string "hello" <>
+                             align (char ' ' <> string "world" <!>
+                                    nest 2 (string "today"))),
     "indent" ~: Lazy.fromString "  hello" @=?
       renderOptimal 1 False (indent 2 (string "hello")),
     "indent_line" ~: Lazy.fromString "  hello\n  world" @=?
@@ -97,9 +125,9 @@ renderOptimalTests = [
       renderOptimal 9 False (choose [string "hello ", string "hello" <> line] <>
                        choose [string "world", string "you"]),
     "softline_break" ~: Lazy.fromString "hello\nworld" @=?
-      renderOptimal 6 False (string "hello" <> softline <> string "world"),
+      renderOptimal 6 False (string "hello" </> string "world"),
     "softline_space" ~: Lazy.fromString "hello world" @=?
-      renderOptimal 11 False (string "hello" <> softline <> string "world"),
+      renderOptimal 11 False (string "hello" </> string "world"),
     "delay_indent" ~: Lazy.fromString "\n\n" @=?
       renderOptimal 2 False (nest 2 (line <> line)),
     "delay_indent2" ~: Lazy.fromString "\n\n  hello" @=?
@@ -119,7 +147,34 @@ renderOptimalTests = [
       renderOptimal 5 False (string "aaaaa" <//> string "bbbb" <//>
                              char 'c' <//> string "ddd" <//> string "ee" <//>
                              char 'f' <//> char 'g' <//> char 'h' <//>
-                             char 'i' <//> char 'j')
+                             char 'i' <//> char 'j'),
+    "softline_break_hardline_softline_break" ~:
+      Lazy.fromString "hello\nworld\naaaa\nbbb" @=?
+        renderOptimal 6 False (string "hello" </> string "world" <!>
+                               string "aaaa" </> string "bbb"),
+    "softline_break_hardline_softline_space" ~:
+      Lazy.fromString "hello\nworld\naaaa bbb" @=?
+        renderOptimal 8 False (string "hello" </> string "world" <!>
+                               string "aaaa" </> string "bbb"),
+    "softline_space_hardline_softline_space" ~:
+      Lazy.fromString "hello world\naaaa bbb" @=?
+        renderOptimal 11 False (string "hello" </> string "world" <!>
+                                string "aaaa" </> string "bbb"),
+    "constructor_break_break" ~:
+      Lazy.fromString "pre (hello\n     world\n     aaaa\n     bbb)" @=?
+      renderOptimal 10 False structdoc,
+    "constructor_break_space" ~:
+      Lazy.fromString "pre (hello\n     world\n     aaaa bbb)" @=?
+      renderOptimal 14 False structdoc,
+    "constructor_space_space" ~:
+      Lazy.fromString "pre (hello world\n     aaaa bbb)" @=?
+      renderOptimal 16 False structdoc,
+    "constructor_nested" ~:
+      Lazy.fromString "pre (inner(123\n           456)\n     hello\n     aaaa bbb)" @=?
+      renderOptimal 15 False nesteddoc,
+    "constructor_nested2" ~:
+      Lazy.fromString "pre (hello\n     inner(123\n           456)\n     aaaa bbb)" @=?
+      renderOptimal 15 False nesteddoc2
   ]
 
 testlist :: [Test]

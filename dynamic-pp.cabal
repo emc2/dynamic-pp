@@ -16,12 +16,16 @@ Description:
   reduces the available combinators, but provides a layout engine that optimizes documents, minimizing their
   over-wrap and line count.
   .
-  The dynamic programming algorithm has pathological cases that cause it to run in quadratic time; however,
+  The dynamic programming algorithm has pathological cases that cause it to run in polynomial time; however,
   typical use on code-like programs should see better run times.  In general, documents with many uses of the
   choose combinator will require more time to render.
   .
-  This library also provides two simpler rendering engines for uses where the full optimal layout engine is not
-  necessary.  These engines are much simpler and consume fewer resources.
+  The library also provides a greedy renderer which is equivalent to the typical Wadler-Leijin engine.  Two simple
+  renderers are also provided for non-human-readable uses.
+  .
+  As of this time, the algorithm is asymptotically polynomial; however, the exponent is large enough to cause serious
+  problems for deeply nested programs, making the optimal renderer impractical for these sorts of programs.  The greedy
+  renderer is recommended for these cases.
   .
   NOTE: This library is still in development.  It may contain bugs, performance issues, and the interface may change.
 Build-type:             Simple

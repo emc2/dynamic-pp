@@ -192,6 +192,7 @@ import Data.List(intersperse, minimumBy, sort)
 import Data.Maybe
 import Data.Monoid hiding ((<>))
 import Data.Word
+--import Debug.Trace
 import Prelude hiding ((<$>), concat)
 import System.Console.ANSI
 import System.IO
@@ -1183,16 +1184,12 @@ instance Eq Column where
 -- function that actually produces the Builder.
 data Render =
   Render {
-    -- | Upper-bound: Highest starting column for this document
-    -- without causing overrun.  If this is negative, it means you've
-    -- overrun by that much.
-    renderUpper :: !Int,
+    -- | Width: Number of columns at the widest point.
+    renderWidth :: !Column,
     -- | Ending column.
     renderCol :: !Column,
     -- | The number of lines in the document.
     renderLines :: !Word,
-    -- | The largest amount by which we've overrun.
-    renderOverrun :: !Column,
     -- | A builder that constructs the document.
     renderBuilder :: !(Int -> Int -> Builder),
     -- | Indentation mode for the next document.
@@ -1200,51 +1197,42 @@ data Render =
   }
 
 instance Show Render where
-  show Render { renderUpper = upper, renderCol = col, renderLines = lns,
-                renderOverrun = overrun, renderBuilder = builder,
-                renderEnding = end } =
-    "Render { renderUpper = " ++ show upper ++ ", renderCol = " ++ show col ++
-    ", renderLines = " ++ show lns ++ ", renderOverrun = " ++ show overrun ++
+  show Render { renderWidth = width, renderCol = col, renderLines = lns,
+                renderBuilder = builder, renderEnding = end } =
+    "Render { renderWidth = " ++ show width ++ ", renderCol = " ++ show col ++
+    ", renderLines = " ++ show lns ++
     ", renderBuilder = " ++ show (toLazyByteString (builder 0 0)) ++
     ", renderIndent = " ++ show end ++
     " }"
+
+subsumesColumn :: Column -> Column -> Bool
+-- Simple comparisons: if the upper bound is greater, the lines are
+-- less, and the column is less, then the render is always better.
+subsumesColumn Fixed { fixedOffset = col1 } Fixed { fixedOffset = col2 } =
+  col1 <= col2
+subsumesColumn Relative { relOffset = col1 } Relative { relOffset = col2 } =
+  col1 <= col2
+-- A fixed column offset can subsume a relative offset
+subsumesColumn Fixed { fixedOffset = col1 } Relative { relOffset = col2 } =
+  col1 <= col2
+-- For two maximums, it's a straightaway comparison
+subsumesColumn Maximum { maxRelative = rel1, maxFixed = fixed1 }
+               Maximum { maxRelative = rel2, maxFixed = fixed2 } =
+  rel1 <= rel2 && fixed1 <= fixed2
+subsumesColumn Fixed { fixedOffset = col1 } Maximum { maxRelative = rel2,
+                                                      maxFixed = fixed2 } =
+  col1 <= rel2 && col1 <= fixed2
+subsumesColumn _ _ = False
 
 -- | Determine whether the first 'Render' is strictly better than the second.
 subsumes :: Render -> Render -> Bool
 -- Simple comparisons: if the upper bound is greater, the lines are
 -- less, and the column is less, then the render is always better.
-subsumes Render { renderUpper = upper1, renderLines = lines1,
-                  renderCol = Fixed { fixedOffset = col1 } }
-         Render { renderUpper = upper2, renderLines = lines2,
-                  renderCol = Fixed { fixedOffset = col2 } } =
-  upper1 >= upper2 && lines1 <= lines2 && col1 <= col2
-subsumes Render { renderUpper = upper1, renderLines = lines1,
-                  renderCol = Relative { relOffset = col1 } }
-         Render { renderUpper = upper2, renderLines = lines2,
-                  renderCol = Relative { relOffset = col2 } } =
-  upper1 >= upper2 && lines1 <= lines2 && col1 <= col2
--- A fixed column offset can subsume a relative offset
-subsumes Render { renderUpper = upper1, renderLines = lines1,
-                  renderCol = Fixed { fixedOffset = col1 } }
-         Render { renderUpper = upper2, renderLines = lines2,
-                  renderCol = Relative { relOffset = col2 } } =
-  upper1 >= upper2 && lines1 <= lines2 && col1 <= col2
--- For two maximums, it's a straightaway comparison
-subsumes Render { renderUpper = upper1, renderLines = lines1,
-                  renderCol = Maximum { maxRelative = rel1,
-                                        maxFixed = fixed1 } }
-         Render { renderUpper = upper2, renderLines = lines2,
-                  renderCol = Maximum { maxRelative = rel2,
-                                        maxFixed = fixed2 } } =
-  upper1 >= upper2 && lines1 <= lines2 && rel1 <= rel2 && fixed1 <= fixed2
--- Fixed can subsume a maximum as above
-subsumes Render { renderUpper = upper1, renderLines = lines1,
-                  renderCol =  Fixed { fixedOffset = col1 } }
-         Render { renderUpper = upper2, renderLines = lines2,
-                  renderCol = Maximum { maxRelative = rel2,
-                                        maxFixed = fixed2 } } =
-  upper1 >= upper2 && lines1 <= lines2 && col1 <= rel2 && col1 <= fixed2
-subsumes _ _ = False
+subsumes Render { renderWidth = width1, renderLines = lines1,
+                  renderCol = col1 }
+         Render { renderWidth = width2, renderLines = lines2,
+                  renderCol = col2 } =
+  lines1 <= lines2 && subsumesColumn width1 width2 && subsumesColumn col1 col2
 
 -- | A result.  This is split into 'Single' and 'Multi' in order to
 -- optimize for the common case of a single possible rendering.
@@ -1290,21 +1278,6 @@ packResult :: [Render] -> Result
 packResult [opt] = Single { singleRender = opt }
 packResult opts = Multi { multiOptions = opts }
 
--- Pick the best result out of a set of results.  Used at the end to
--- pick the final result.
-bestRenderInOpts :: [Render] -> Render
-bestRenderInOpts =
-  let
-    -- | Compare two Renders.  Less than means better.
-    compareRenders Render { renderLines = lines1, renderOverrun = overrun1 }
-                   Render { renderLines = lines2, renderOverrun = overrun2 } =
-      -- This is the same logic as bestRender
-      case compare overrun1 overrun2 of
-        EQ -> compare lines1 lines2
-        out -> out
-  in
-    minimumBy compareRenders
-
 -- | Append operation on complete states.  A complete state is the
 -- contents of an Offset and a Render (ie. the contents of Single, or
 -- the contents of an entry in a Multi combined with the corresponding
@@ -1313,11 +1286,10 @@ appendOne :: Render -> Render -> Render
 appendOne r1 r2
   | debug ("appendOne\n  " ++ show r1 ++ "\n  " ++ show r2 ++ " =") False =
     undefined
-appendOne Render { renderUpper = upper1, renderLines = lines1, renderCol = col1,
-                   renderOverrun = overrun1, renderBuilder = build1 }
-          Render { renderUpper = upper2, renderLines = lines2, renderCol = col2,
-                   renderOverrun = overrun2, renderBuilder = build2,
-                   renderEnding = end } =
+appendOne Render { renderWidth = width1, renderLines = lines1,
+                   renderCol = col1, renderBuilder = build1 }
+          Render { renderWidth = width2, renderLines = lines2, renderCol = col2,
+                   renderBuilder = build2, renderEnding = end } =
   let
     -- The new build is completely determined by the first render's
     -- starting column.
@@ -1335,31 +1307,6 @@ appendOne Render { renderUpper = upper1, renderLines = lines1, renderCol = col1,
       Maximum { maxRelative = rel, maxFixed = fixed } ->
         \nesting col -> build1 nesting col `mappend`
                         build2 nesting (max fixed (col + rel))
-
-    -- The new upper-bound is determined by both ending columns.
-    --
-    -- IMPORTANT: In this logic, a negative upper-bound means you
-    -- overrun by that much.  This is critical to the functioning of
-    -- this logic.
-    newupper = case (col1, col2) of
-      -- If the second column is fixed, then the upper-bound is the
-      -- minimum of the two upper-bounds.
-      (_, Fixed {}) -> min upper1 upper2
-      -- Otherwise, we decrement the second upper-bound and take the
-      -- minimum with the first.
-      (Fixed { fixedOffset = n }, _) -> min upper1 (upper2 - n)
-      (Relative { relOffset = n }, _) -> min upper1 (upper2 - n)
-      -- For maximum, take the minimum over the first upper-bound, the
-      -- second decremented by the fixed portion, and the second
-      -- decremented by the relative portion.
-      (Maximum { maxFixed = fixed, maxRelative = rel }, _) ->
-        min upper1 (min (upper2 - fixed) (upper2 - rel))
-
-    -- If the new upper bound is negative, the overrun is its absolute value
-    newoverrun =
-      if newupper < 0
-        then Relative { relOffset = abs newupper }
-        else Fixed { fixedOffset = 0 }
 
     newcol = case (col1, col2, end) of
       -- If the second column is fixed, it doesn't matter what the first is.
@@ -1395,13 +1342,39 @@ appendOne Render { renderUpper = upper1, renderLines = lines1, renderCol = col1,
         Maximum { maxFixed = max fixed2 (fixed1 + rel2),
                   maxRelative = rel1 + rel2 }
 
+    -- Recalculate the second width using the first ending column.
+    newwidth = case (col1, width2) of
+      -- If the second column is fixed, then the width is the
+      -- maximum of the previous widths and the new column.
+      (_, Fixed {}) -> max (max width1 width2) newcol
+      -- Otherwise, we increment the second width and take the
+      -- maximum with the first and the new column.
+      (Fixed { fixedOffset = n }, Relative { relOffset = rel }) ->
+        max (max width1 Fixed { fixedOffset = rel + n }) newcol
+      (Fixed { fixedOffset = n }, Maximum { maxRelative = rel,
+                                            maxFixed = fixed }) ->
+        max (max width1 Fixed { fixedOffset = max fixed (rel + n) }) newcol
+      -- For a maximum, we only increment the relative offset.
+      (Relative { relOffset = n }, Relative { relOffset = rel }) ->
+        max (max width1 Relative { relOffset = rel + n }) newcol
+      (Relative { relOffset = n }, m @ Maximum { maxRelative = rel }) ->
+        max (max width1 m { maxRelative = rel + n }) newcol
+      -- For maximum, take the maximum over the first upper-bound, the
+      -- second incremented by the fixed portion, and the second
+      -- incremented by the relative portion.
+      (Maximum { maxFixed = fixed, maxRelative = rel },
+       Relative { relOffset = off }) ->
+        max Maximum { maxFixed = fixed + off, maxRelative = rel + off }
+            (max width1 newcol)
+      (Maximum { maxFixed = fixed1, maxRelative = rel1 },
+       Maximum { maxFixed = fixed2, maxRelative = rel2 }) ->
+        max Maximum { maxFixed = max (fixed1 + rel2) fixed2,
+                      maxRelative = rel1 + rel2 }
+            (max width1 newcol)
+
     out = Render { renderBuilder = newbuild, renderEnding = end,
-                   renderLines = lines1 + lines2, renderUpper = newupper,
-                   -- For the new overrun, take the max of the existing
-                   -- overruns and newoverrun
-                   renderOverrun = max (max overrun1 overrun2) newoverrun,
-                   -- For the new column, use advance
-                   renderCol = newcol }
+                   renderWidth = newwidth, renderCol = newcol,
+                   renderLines = lines1 + lines2 }
 
   in
     debug ("    " ++ show out ++ "\n\n") out
@@ -1439,15 +1412,26 @@ contentBuilder Indent builder nesting col =
 -- Otherwise, do nothing.
 contentBuilder Normal builder _ _ = builder
 
+overrun :: Int -> Column -> Int
+overrun maxcol Fixed { fixedOffset = offset } =
+  if offset > maxcol then offset - maxcol else 0
+overrun maxcol Relative { relOffset = offset } =
+  if offset > maxcol then offset - maxcol else 0
+overrun maxcol Maximum { maxFixed = fixed, maxRelative = rel } =
+  let
+    highest = max fixed rel
+  in
+    if highest > maxcol then highest - maxcol else 0
+
 -- | Produce a 'Builder' that renders the 'Doc' using the greedy
 -- layout engine.
 buildGreedy :: Int
-             -- ^ The maximum number of columns.
-             -> Bool
-             -- ^ Whether or not to render with ANSI terminal options.
-             -> Doc
-             -- ^ The document to render.
-             -> Builder
+            -- ^ The maximum number of columns.
+            -> Bool
+            -- ^ Whether or not to render with ANSI terminal options.
+            -> Doc
+            -- ^ The document to render.
+            -> Builder
 buildGreedy maxcol ansiterm doc =
 
   let
@@ -1457,42 +1441,36 @@ buildGreedy maxcol ansiterm doc =
     -- For char, bytestring, and lazy bytestring,
     build _ _ ind Char { charContent = chr } =
       let
-        -- Why would you have maxcol == 0?  Who knows, but check for it.
-        overrun = if maxcol >= 1 then Relative 0 else Relative (maxcol - 1)
         builder = contentBuilder ind (fromChar chr)
       in
         -- Single characters have a single possibility, a relative
         -- ending position one beyond the start, and an upper-bound
         -- one shorter than the maximum width.
-        Render { renderOverrun = overrun, renderEnding = Normal,
-                 renderBuilder = builder, renderCol = Relative 1,
-                 renderLines = 0, renderUpper = maxcol - 1 }
+        Render { renderEnding = Normal, renderBuilder = builder,
+                 renderCol = Relative 1, renderLines = 0,
+                 renderWidth = Relative 1 }
     build _ _ ind Content { contentString = txt, contentLength = len } =
       let
-        -- Why would you have maxcol == 0?  Who knows, but check for it.
-        overrun = if maxcol >= len then Relative 0 else Relative (len - maxcol)
         builder = contentBuilder ind (fromLazyByteString txt)
       in
         -- Text has a single possibility and a relative ending position
         -- equal to its length
-       Render { renderLines = 0, renderUpper = maxcol - len,
+       Render { renderLines = 0, renderWidth = Relative len,
                 renderBuilder = builder, renderCol = Relative len,
-                renderEnding = Normal, renderOverrun = overrun }
+                renderEnding = Normal }
     build _ nesting _ Line {} =
       -- A newline starts at the nesting level, has no overrun, and an
       -- upper-bound equal to the maximum column width.
       --
       -- Note: the upper bound is adjusted elsewhere.
-      Render { renderOverrun = Fixed { fixedOffset = 0 },
-               renderEnding = Newline, renderLines = 1,
-               renderBuilder = const $! const $! fromChar '\n',
-               renderCol = nesting, renderUpper = maxcol }
+      Render { renderEnding = Newline, renderLines = 1,
+               renderCol = nesting, renderWidth = nesting,
+               renderBuilder = const $! const $! fromChar '\n' }
     build _ _ end Cat { catDocs = [] } =
       -- The empty document has no content, no overrun, a relative end
       -- position of 0, and an upper-bound of maxcol.
-      Render { renderOverrun = Fixed 0, renderEnding = end,
-               renderLines = 0, renderBuilder = const mempty,
-               renderCol = Relative 0, renderUpper = maxcol }
+      Render { renderEnding = end, renderCol = Relative 0, renderLines = 0,
+               renderBuilder = const mempty, renderWidth = Relative 0 }
     build sgr nesting ind Cat { catDocs = first : rest } =
       let
         -- Glue two Results together.  This gets used in a fold.
@@ -1555,9 +1533,9 @@ buildGreedy maxcol ansiterm doc =
         greedy [only] = build sgr nesting ind only
         greedy (first : rest) =
           let
-            r @ Render { renderUpper = upper } = build sgr nesting ind first
+            r @ Render { renderWidth = width } = build sgr nesting ind first
           in
-            if upper > 0 then r else greedy rest
+            if overrun maxcol width /= 0 then r else greedy rest
       in
         greedy options
     build sgr1 nesting ind Graphics { graphicsSGR = sgr2, graphicsDoc = inner }
@@ -1633,51 +1611,49 @@ buildOptimal :: Int
 buildOptimal maxcol ansiterm doc =
   let
     build :: Graphics -> Column -> Ending -> Doc -> Result
+    build _ col end d
+      | debug ("build\n  " ++ show col ++ "\n  " ++ show end ++
+               "\n  " ++ show d ++ " =") False = undefined
     -- For char, bytestring, and lazy bytestring,
     build _ _ ind Char { charContent = chr } =
       let
-        -- Why would you have maxcol == 0?  Who knows, but check for it.
-        overrun = if maxcol >= 1 then Relative 0 else Relative (maxcol - 1)
         builder = contentBuilder ind (fromChar chr)
       in
         -- Single characters have a single possibility, a relative
         -- ending position one beyond the start, and an upper-bound
         -- one shorter than the maximum width.
         Single { singleRender =
-                    Render { renderOverrun = overrun, renderEnding = Normal,
-                             renderBuilder = builder, renderCol = Relative 1,
-                             renderLines = 0, renderUpper = maxcol - 1 } }
+                    Render { renderEnding = Normal, renderBuilder = builder,
+                             renderCol = Relative 1, renderLines = 0,
+                             renderWidth = Relative 1 } }
     build _ _ ind Content { contentString = txt, contentLength = len } =
       let
-        -- Why would you have maxcol == 0?  Who knows, but check for it.
-        overrun = if maxcol >= len then Relative 0 else Relative (len - maxcol)
         builder = contentBuilder ind (fromLazyByteString txt)
       in
         -- Text has a single possibility and a relative ending position
         -- equal to its length
        Single { singleRender =
-                   Render { renderLines = 0, renderUpper = maxcol - len,
+                   Render { renderLines = 0, renderWidth = Relative len,
                             renderBuilder = builder, renderCol = Relative len,
-                            renderEnding = Normal, renderOverrun = overrun } }
+                            renderEnding = Normal } }
     build _ nesting _ Line {} =
       -- A newline starts at the nesting level, has no overrun, and an
       -- upper-bound equal to the maximum column width.
       --
       -- Note: the upper bound is adjusted elsewhere.
       Single {
-        singleRender = Render { renderOverrun = Fixed { fixedOffset = 0 },
-                                renderEnding = Newline, renderLines = 1,
+        singleRender = Render { renderEnding = Newline, renderLines = 1,
                                 renderBuilder = const $! const $!
                                                 fromChar '\n',
-                                renderCol = nesting, renderUpper = maxcol } }
+                                renderCol = nesting, renderWidth = nesting } }
     -- This is for an empty cat, ie. the empty document
     build _ _ end Cat { catDocs = [] } =
       -- The empty document has no content, no overrun, a relative end
       -- position of 0, and an upper-bound of maxcol.
       Single {
-        singleRender = Render { renderOverrun = Fixed 0, renderEnding = end,
-                                renderLines = 0, renderBuilder = const mempty,
-                                renderCol = Relative 0, renderUpper = maxcol } }
+        singleRender = Render { renderEnding = end, renderCol = Relative 0,
+                                renderLines = 0, renderWidth = Relative 0,
+                                renderBuilder = const mempty } }
     build sgr nesting end Cat { catDocs = first : rest } =
       let
         -- Glue two Results together.  This gets used in a fold.
@@ -1809,6 +1785,21 @@ buildOptimal maxcol ansiterm doc =
             m { multiOptions = map wrapBuilder opts }
       -- Otherwise, skip it entirely
       | otherwise = build sgr2 nesting ind inner
+
+    -- Pick the best result out of a set of results.  Used at the end to
+    -- pick the final result.
+    bestRenderInOpts :: [Render] -> Render
+    bestRenderInOpts =
+      let
+        -- | Compare two Renders.  Less than means better.
+        compareRenders Render { renderLines = lines1, renderWidth = width1 }
+                       Render { renderLines = lines2, renderWidth = width2 } =
+          -- This is the same logic as bestRender
+          case compare (overrun maxcol width1) (overrun maxcol width2) of
+            EQ -> compare lines1 lines2
+            out -> out
+      in
+        minimumBy compareRenders
 
     -- Call build, get the result, then pick the best one.
     Render { renderBuilder = result } =

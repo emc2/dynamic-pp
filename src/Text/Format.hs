@@ -1347,6 +1347,33 @@ subsumes Render { renderWidth = width1, renderLines = lines1,
                   renderCol = col2 } =
   lines1 <= lines2 && subsumesColumn width1 width2 && subsumesColumn col1 col2
 
+newtype Frontier = Frontier { frontierRenders :: [Render] }
+
+-- Add a 'Render' into a result set, ensuring that any subsumed
+-- renders are dropped.
+--
+-- TODO: The asymptotic runtime of this could likely be improved by some
+-- kind of tree structure; however, the design of this structure is
+-- nontrivial, due to the 3+-dimensional nature of subsumption, and
+-- the wierd interactions between the various kinds of column offsets.
+insertRender :: Frontier -> Render -> Frontier
+insertRender Frontier { frontierRenders = renders } ins
+    -- If the inserted element is subsumed by anything in the
+    -- list, then don't insert it at all.
+  | any (`subsumes` ins) renders = Frontier { frontierRenders = renders }
+    -- Otherwise, add the element to the list, and drop everything it subsumes.
+  | otherwise =
+    Frontier { frontierRenders = ins : filter (not . subsumes ins) renders }
+
+instance Monoid Frontier where
+  mempty = Frontier { frontierRenders = [] }
+
+  mappend front1 @ Frontier { frontierRenders = renders1 }
+          front2 @ Frontier { frontierRenders = renders2 } =
+    if length renders1 < length renders2
+      then foldl insertRender front2 renders1
+      else foldl insertRender front1 renders2
+
 -- | A result.  This is split into 'Single' and 'Multi' in order to
 -- optimize for the common case of a single possible rendering.
 -- Otherwise, it would be perfectly fine to represent everything as a
@@ -1363,33 +1390,67 @@ data Result =
       -- upper-bound (meaning the first column at which using any of
       -- the contents will cause an overrun).  The second map is
       -- indexed by the ending column.
-      multiOptions :: ![Render]
+      multiOptions :: !Frontier
     }
+
+instance Monoid Result where
+  mempty = Single { singleRender = mempty }
+
+  -- If both are single, just concatenate them.
+  mappend Single { singleRender = render1 } Single { singleRender = render2 } =
+    Single { singleRender = render1 `mappend` render2 }
+  -- If the first is single and the second is multi, we have to fold
+  -- over all the options and glue on the first render.
+  mappend Single { singleRender = render1 }
+          Multi { multiOptions = Frontier { frontierRenders = opts } } =
+    let
+      -- Glue the first render on to an option.
+      foldfun :: Frontier -> Render -> Frontier
+      foldfun accum = insertRender accum . mappend render1
+    in
+      -- Fold it up, then use packResult.
+      packResult (foldl foldfun mempty opts)
+  -- If the first render is a multi, then we'll need to
+  -- glue the second render on to each option.
+  mappend Multi { multiOptions = Frontier { frontierRenders = opts } }
+          Single { singleRender = render2 } =
+    let
+      -- Glue the first render on to an option.
+      foldfun :: Frontier -> Render -> Frontier
+      foldfun accum render1 = insertRender accum (render1 `mappend` render2)
+    in
+      -- Fold it up, then use packResult.
+      packResult (foldl foldfun mempty opts)
+  -- If both are multis, then we need a two-level fold
+  mappend Multi { multiOptions = Frontier { frontierRenders = opts1 } }
+          Multi { multiOptions = Frontier { frontierRenders = opts2 } } =
+    let
+      -- Outer fold, over each option in the accumulated result,
+      -- gluing on the next render.
+      outerfold :: Frontier -> Render -> Frontier
+      outerfold accum render1 =
+        let
+          -- Innermost fold, glues two options together
+          innerfold :: Frontier -> Render -> Frontier
+          innerfold accum' = insertRender accum' . mappend render1
+        in
+          -- Don't bother calling packResult here, we'll do
+          -- it at the end anyway.
+          foldl innerfold accum opts2
+    in
+      -- Fold it up, then use packResult.
+      packResult (foldl outerfold mempty opts1)
 
 -- | Generate n spaces
 makespaces :: Int -> Builder
 makespaces n = fromLazyByteString (Lazy.Char8.replicate (fromIntegral n) ' ')
 
--- Add a 'Render' into a result set, ensuring that any subsumed
--- renders are dropped.
---
--- TODO: The asymptotic runtime of this could likely be improved by some
--- kind of tree structure; however, the design of this structure is
--- nontrivial, due to the 3+-dimensional nature of subsumption, and
--- the wierd interactions between the various kinds of column offsets.
-insertRender :: [Render] -> Render -> [Render]
-insertRender renders ins
-    -- If the inserted element is subsumed by anything in the
-    -- list, then don't insert it at all.
-  | any (`subsumes` ins) renders = renders
-    -- Otherwise, add the element to the list, and drop everything it subsumes.
-  | otherwise = ins : filter (not . subsumes ins) renders
-
 -- If a result only has one possibility, convert it to a Single.
 -- Otherwise, leave it.
-packResult :: [Render] -> Result
-packResult [opt] = Single { singleRender = opt }
-packResult opts = Multi { multiOptions = opts }
+packResult :: Frontier -> Result
+packResult Frontier { frontierRenders = [opt] } = Single { singleRender = opt }
+packResult Frontier { frontierRenders = opts }  =
+  Multi { multiOptions = Frontier { frontierRenders = opts } }
 
 -- | Combine two results into a Multi.  This achieves the same result
 -- as HashMap.unionWith bestRender (meaning, union these maps,
@@ -1401,7 +1462,7 @@ mergeResults s1 @ Single { singleRender = r1 }
              s2 @ Single { singleRender = r2 }
   | subsumes r1 r2 = s1
   | subsumes r2 r1 = s2
-  | otherwise = Multi { multiOptions = [r1, r2] }
+  | otherwise = Multi { multiOptions = Frontier { frontierRenders = [r1, r2] } }
 mergeResults Single { singleRender = render }
              Multi { multiOptions = opts } =
   packResult (insertRender opts render)
@@ -1409,7 +1470,7 @@ mergeResults Single { singleRender = render }
 mergeResults m @ Multi {} s @ Single {} = mergeResults s m
 -- Otherwise it's a straightaway HashMap union
 mergeResults Multi { multiOptions = opts1 } Multi { multiOptions = opts2 } =
-  packResult (foldl insertRender opts1 opts2)
+  packResult (opts1 `mappend` opts2)
 
 -- Add indentation on to a builder.  Note, this is used to create the
 -- builder functions used in Render.
@@ -1657,60 +1718,13 @@ buildOptimal maxcol ansiterm doc =
                                                 fromChar '\n',
                                 renderCol = nesting, renderWidth = nesting } }
     -- This is for an empty cat, ie. the empty document
-    build _ _ Cat { catDocs = [] } = Single { singleRender = mempty }
+    build _ _ Cat { catDocs = [] } = mempty
     build sgr nesting Cat { catDocs = first : rest } =
       let
         -- Glue two Results together.  This gets used in a fold.
         appendResults :: Result -> Doc -> Result
         -- The accumulated result is a Single.
-        appendResults Single { singleRender = render1 } doc' =
-          -- Render the document.
-          case build sgr nesting doc' of
-            -- If there's a single result, it's easy; just use appendOne.
-            Single { singleRender = render2  } ->
-              let
-                newrender = render1 `mappend` render2
-              in
-                Single { singleRender = newrender }
-            -- Otherwise, we have to fold over all the options and
-            -- glue on the accumulated result.
-            Multi { multiOptions = opts } ->
-              let
-                -- Level 2 fold function: glue the accumulated result
-                -- on to an option.
-                foldfun :: [Render] -> Render -> [Render]
-                foldfun accum = insertRender accum . mappend render1
-              in
-                -- Fold it up, then use packResult.
-                packResult (foldl foldfun [] opts)
-        -- If the accumulate result is a multi, then we'll need to
-        -- glue the next render on to each option.
-        appendResults Multi { multiOptions = opts } doc' =
-          let
-            -- Outer fold, over each option in the accumulated result,
-            -- gluing on the next render.
-            outerfold :: [Render] -> Render -> [Render]
-            outerfold accum render1 =
-              case build sgr nesting doc' of
-                -- If the render is a single result, then just glue it
-                -- on to the current option.
-                Single { singleRender = render2 } ->
-                  insertRender accum (render1 `mappend` render2)
-                -- If the render result is ALSO a Multi, then we need
-                -- to do another level of fold to glue those options
-                -- on to the current one.
-                Multi { multiOptions = opts2 } ->
-                  let
-                    -- Innermost fold, glues two options together
-                    innerfold :: [Render] -> Render -> [Render]
-                    innerfold accum' = insertRender accum' . mappend render1
-                  in
-                    -- Don't bother calling packResult here, we'll do
-                    -- it at the end anyway.
-                    foldl innerfold accum opts2
-          in
-            -- Fold it up, then use packResult.
-            packResult (foldl outerfold [] opts)
+        appendResults res1 = mappend res1 . build sgr nesting
 
         -- Build the first item
         firstres = build sgr nesting first
@@ -1760,8 +1774,11 @@ buildOptimal maxcol ansiterm doc =
         -- Update the render for a Single.
         s @ Single { singleRender = r } -> s { singleRender = updateRender r }
         -- Update all renders for a Multi.
-        m @ Multi { multiOptions = opts } ->
-          m { multiOptions = map updateRender opts }
+        m @ Multi { multiOptions = Frontier { frontierRenders = opts } } ->
+          let
+            updated = map updateRender opts
+          in
+            m { multiOptions = Frontier { frontierRenders = updated } }
     build sgr nesting Choose { chooseOptions = options } =
       let
         -- Build up all the components
@@ -1782,8 +1799,11 @@ buildOptimal maxcol ansiterm doc =
         in case build sgr2 nesting inner of
           s @ Single { singleRender = render } ->
             s { singleRender = wrapBuilder render }
-          m @ Multi { multiOptions = opts } ->
-            m { multiOptions = map wrapBuilder opts }
+          m @ Multi { multiOptions = Frontier { frontierRenders = opts } } ->
+            let
+              wrapped = map wrapBuilder opts
+            in
+              m { multiOptions = Frontier { frontierRenders = wrapped } }
       -- Otherwise, skip it entirely
       | otherwise = build sgr2 nesting inner
 
@@ -1806,7 +1826,8 @@ buildOptimal maxcol ansiterm doc =
     Render { renderBuilder = result } =
       case build Default Fixed { fixedOffset = 0 } doc of
         Single { singleRender = render } -> render
-        Multi opts -> bestRenderInOpts opts
+        Multi { multiOptions = Frontier { frontierRenders = opts } } ->
+          bestRenderInOpts opts
   in
     result Newline 0 0
 

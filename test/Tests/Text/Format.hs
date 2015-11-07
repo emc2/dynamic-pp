@@ -174,7 +174,15 @@ renderOptimalTests =
       renderOptimal 15 False nesteddoc,
     "constructor_nested2" ~:
       Lazy.fromString "pre (hello\n     inner(123\n           456)\n     aaaa bbb)" @=?
-      renderOptimal 15 False nesteddoc2
+      renderOptimal 15 False nesteddoc2,
+    "dullWhite" ~: Lazy.fromString "\ESC[37mhello\ESC[0m" @=?
+      renderOptimal 20 True (dullWhite (string "hello")),
+    "dullWhite_left_concat" ~: Lazy.fromString "\ESC[37mhello\ESC[0mworld" @=?
+      renderOptimal 20 True (dullWhite (string "hello") <> string "world"),
+    "dullWhite_right_concat" ~: Lazy.fromString "hello\ESC[37mworld\ESC[0m" @=?
+      renderOptimal 20 True (string "hello" <> dullWhite (string "world")),
+    "dullWhite_inner_concat" ~: Lazy.fromString "\ESC[37mhelloworld\ESC[0m" @=?
+      renderOptimal 20 True (dullWhite (string "hello" <> string "world"))
   ]
 
 testlist :: [Test]

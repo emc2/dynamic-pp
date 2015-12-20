@@ -186,7 +186,7 @@ import Data.List(intersperse, minimumBy, sort)
 import Data.Maybe
 import Data.Monoid hiding ((<>))
 import Data.Word
-import Prelude hiding ((<$>), concat)
+import Prelude hiding ((<$>), concat, maximum, minimum)
 import System.Console.ANSI
 import System.IO
 
@@ -1160,13 +1160,11 @@ instance Ord Width where
     case compare n1 n2 of
       EQ -> LT
       out -> out
-  compare Maximum { maxFixed = fixed, maxRelative = rel }
-          Fixed { fixedOffset = n } =
-    case compare fixed n of
-      EQ -> case compare rel n of
-        EQ -> GT
-        out -> out
-      out -> out
+  compare m @ Maximum {} f @ Fixed {} =
+    case compare f m of
+      LT -> GT
+      EQ -> EQ
+      GT -> LT
   compare Maximum { maxFixed = fixed1, maxRelative = rel1 }
           Maximum { maxFixed = fixed2, maxRelative = rel2 } =
     case compare fixed1 fixed2 of
@@ -1179,40 +1177,46 @@ instance Ord Width where
         EQ -> GT
         out -> out
       out -> out
-  compare Relative { relOffset = n1 } Fixed { fixedOffset = n2 } =
-    case compare n1 n2 of
-      EQ -> GT
-      out -> out
-  compare Relative { relOffset = n }
-          Maximum { maxFixed = fixed, maxRelative = rel } =
-    case compare n rel of
-      EQ -> case compare n fixed of
-        EQ -> LT
-        out -> out
-      out -> out
+  compare r @ Relative {} f @ Fixed {} =
+    case compare f r of
+      LT -> GT
+      EQ -> EQ
+      GT -> LT
+  compare r @ Relative {} m @ Maximum {} =
+    case compare m r of
+      LT -> GT
+      EQ -> EQ
+      GT -> LT
   compare Relative { relOffset = n1 } Relative { relOffset = n2 } =
     compare n1 n2
 
 instance Eq Width where
   c1 == c2 = compare c1 c2 == EQ
 
+maximum :: Int -> Int -> Width
+maximum fixed rel
+  | rel >= fixed = Relative { relOffset = rel }
+  | otherwise = Maximum { maxFixed = fixed, maxRelative = rel }
+
 maxWidth :: Width -> Width -> Width
 maxWidth Fixed { fixedOffset = n1 } Fixed { fixedOffset = n2 } =
   Fixed { fixedOffset = max n1 n2 }
 maxWidth Fixed { fixedOffset = fixed } Relative { relOffset = rel } =
-  Maximum { maxFixed = fixed, maxRelative = rel }
+  maximum fixed rel
 maxWidth r @ Relative {} f @ Fixed {} = maxWidth f r
-maxWidth Fixed { fixedOffset = fixed1 } m @ Maximum { maxFixed = fixed2 } =
-  m { maxFixed = max fixed1 fixed2 }
+maxWidth Fixed { fixedOffset = fixed1 }
+         Maximum { maxFixed = fixed2, maxRelative = rel } =
+  maximum (max fixed1 fixed2) rel
 maxWidth m @ Maximum {} f @ Fixed {} = maxWidth f m
 maxWidth Relative { relOffset = rel1 } Relative { relOffset = rel2 } =
   Relative { relOffset = max rel1 rel2 }
-maxWidth Relative { relOffset = rel1 } m @ Maximum { maxRelative = rel2 } =
-  m { maxRelative = max rel1 rel2 }
+maxWidth Relative { relOffset = rel1 }
+         Maximum { maxFixed = fixed, maxRelative = rel2 } =
+  maximum fixed (max rel1 rel2)
 maxWidth m @ Maximum {} r @ Relative {} = maxWidth r m
 maxWidth Maximum { maxFixed = fix1, maxRelative = rel1 }
          Maximum { maxFixed = fix2, maxRelative = rel2 } =
-  Maximum { maxFixed = max fix1 fix2, maxRelative = max rel1 rel2 }
+  maximum (max fix1 fix2) (max rel1 rel2)
 
 -- | A description of the ending.
 data Ending =
@@ -1328,7 +1332,7 @@ instance Monoid Render where
         Fixed { fixedOffset = off } -> Fixed { fixedOffset = off + swidth2 }
         Relative { relOffset = off } -> Relative { relOffset = off + swidth2 }
         Maximum { maxFixed = fixed, maxRelative = rel } ->
-          Maximum { maxFixed = fixed + swidth2, maxRelative = rel + swidth2 }
+          maximum (fixed + swidth2) (rel + swidth2)
 
       newswidth = if lines1 == 0 then swidth1 + swidth2 else swidth1
 
@@ -1352,18 +1356,19 @@ instance Monoid Render where
           Relative { relOffset = start + n }
         -- If we combine a relative and a maximum, then add the relative
         -- offset to the relative portion of the maximum
-        (Relative { relOffset = start }, m @ Maximum { maxRelative = n }) ->
-          m { maxRelative = start + n }
-        (m @ Maximum { maxRelative = rel }, Relative { relOffset = n }) ->
-          m { maxRelative = rel + n }
+        (Relative { relOffset = start }, Maximum { maxFixed = fixed,
+                                                   maxRelative = n }) ->
+          maximum fixed (start + n)
+        (Maximum { maxFixed = fixed, maxRelative = rel },
+         Relative { relOffset = n }) ->
+          maximum fixed (rel + n)
         -- If both are a maximum, then the resulting relative portion is the
         -- sum of the two relative portions.  The resulting fixed portion is
         -- the greater of the second fixed portion, or the first fixed portion
         -- plus the second relative portion.
         (Maximum { maxFixed = fixed1, maxRelative = rel1 },
          Maximum { maxFixed = fixed2, maxRelative = rel2 }) ->
-          Maximum { maxFixed = max fixed2 (fixed1 + rel2),
-                    maxRelative = rel1 + rel2 }
+          maximum (max fixed2 (fixed1 + rel2)) (rel1 + rel2)
 
       -- The new width is the maximum of the two max width, the second
       -- end width, and the width of the newly-formed middle line.

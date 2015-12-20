@@ -1389,19 +1389,27 @@ subsumesWidth Fixed { fixedOffset = col1 } Fixed { fixedOffset = col2 } =
   col1 <= col2
 subsumesWidth Relative { relOffset = col1 } Relative { relOffset = col2 } =
   col1 <= col2
--- A fixed column offset can subsume a relative offset
+-- A fixed column offset can be subsumed by a relative offset
 subsumesWidth Fixed { fixedOffset = col1 } Relative { relOffset = col2 } =
   col1 <= col2
--- For two maximums, it's a straightaway comparison
-subsumesWidth Maximum { maxRelative = rel1, maxFixed = fixed1 }
-              Maximum { maxRelative = rel2, maxFixed = fixed2 } =
-  rel1 <= rel2 && fixed1 <= fixed2
+-- For minimum and maximum cases, we use the three above rules to
+-- reason through them.
+--
+-- A relative can subsume a maximum by the 2nd and 3rd rules.
+subsumesWidth Maximum { maxFixed = fixed1, maxRelative = rel1 }
+              Relative { relOffset = col2 } =
+  fixed1 <= col2 && rel1 <= col2
+-- A maximum can subsume a fixed by the 1st or the 3rd rule.
 subsumesWidth Fixed { fixedOffset = col1 } Maximum { maxRelative = rel2,
                                                      maxFixed = fixed2 } =
-  col1 <= rel2 && col1 <= fixed2
-subsumesWidth Relative { relOffset = col1 } Maximum { maxRelative = rel2,
-                                                      maxFixed = fixed2 } =
-  col1 <= rel2 && col1 <= fixed2
+  col1 <= rel2 || col1 <= fixed2
+-- A maximum can subsume a relative by the 2nd rule.
+subsumesWidth Relative { relOffset = col1 } Maximum { maxRelative = rel2 } =
+  col1 <= rel2
+-- For two maximums, apply all three rules
+subsumesWidth Maximum { maxRelative = rel1, maxFixed = fixed1 }
+              Maximum { maxRelative = rel2, maxFixed = fixed2 } =
+  rel1 <= rel2 && fixed1 <= fixed2 && fixed1 <= rel2
 subsumesWidth _ _ = False
 
 -- | Determine whether the first 'Render' is strictly better than the second.

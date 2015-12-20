@@ -1330,6 +1330,8 @@ instance Monoid Render where
         Maximum { maxFixed = fixed, maxRelative = rel } ->
           Maximum { maxFixed = fixed + swidth2, maxRelative = rel + swidth2 }
 
+      newswidth = if lines1 == 0 then swidth1 + swidth2 else swidth1
+
       -- For the new ending width, advance the second ending width by
       -- the first.
       newewidth = case (ewidth1, ewidth2) of
@@ -1369,7 +1371,7 @@ instance Monoid Render where
 
       out = Render { renderBuilder = newbuild, renderEnding = newend,
                      renderBegin = newbegin, renderLines = lines1 + lines2,
-                     renderStartWidth = swidth1, renderWidth = newwidth,
+                     renderStartWidth = newswidth, renderWidth = newwidth,
                      renderEndWidth = newewidth }
     in
       debug ("    " ++ show out ++ "\n\n") out
@@ -1739,8 +1741,8 @@ buildOptimal maxcol ansiterm doc =
         compareRenders Render { renderLines = lines1, renderWidth = width1 }
                        Render { renderLines = lines2, renderWidth = width2 } =
           case compare (overrun width1) (overrun width2) of
-            EQ -> debug (show (compare lines1 lines2)) (compare lines1 lines2)
-            out -> debug (show out) out
+            EQ -> compare lines1 lines2
+            out -> out
       in
         minimumBy compareRenders
 

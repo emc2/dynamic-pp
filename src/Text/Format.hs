@@ -1313,7 +1313,7 @@ instance Monoid Render where
         --
         -- For a fixed width, we set the column to the offset
         (_, _, Fixed { fixedOffset = off }) ->
-          \sgr n c -> build1 sgr n c `mappend` build2 sgr n off
+          \sgr n c -> build1 sgr n c `mappend` build2 sgr n (n + off)
         -- For a relative offset, we addd the offset to the previous column.
         (_, _, Relative { relOffset = off }) ->
           \sgr n c -> build1 sgr n c `mappend` build2 sgr n (c + off)
@@ -1334,7 +1334,10 @@ instance Monoid Render where
         Maximum { maxFixed = fixed, maxRelative = rel } ->
           maximum (fixed + swidth2) (rel + swidth2)
 
-      newswidth = if lines1 == 0 then swidth1 + swidth2 else swidth1
+      newswidth =
+        if lines1 == 0
+          then swidth1 + swidth2
+          else swidth1
 
       -- For the new ending width, advance the second ending width by
       -- the first.

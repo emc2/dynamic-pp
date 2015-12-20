@@ -1399,6 +1399,9 @@ subsumesWidth Maximum { maxRelative = rel1, maxFixed = fixed1 }
 subsumesWidth Fixed { fixedOffset = col1 } Maximum { maxRelative = rel2,
                                                      maxFixed = fixed2 } =
   col1 <= rel2 && col1 <= fixed2
+subsumesWidth Relative { relOffset = col1 } Maximum { maxRelative = rel2,
+                                                      maxFixed = fixed2 } =
+  col1 <= rel2 && col1 <= fixed2
 subsumesWidth _ _ = False
 
 -- | Determine whether the first 'Render' is strictly better than the second.

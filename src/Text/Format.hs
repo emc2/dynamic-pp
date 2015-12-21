@@ -1218,6 +1218,39 @@ maxWidth Maximum { maxFixed = fix1, maxRelative = rel1 }
          Maximum { maxFixed = fix2, maxRelative = rel2 } =
   maximum (max fix1 fix2) (max rel1 rel2)
 
+advanceWidth :: Width -> Width -> Width
+-- If the second ending width is fixed, then it doesn't change
+advanceWidth _ f @ Fixed {} = f
+-- If the first is fixed and the second is relative, then
+-- advance the first by the relative offset, unless the first
+-- document ends with a line.
+advanceWidth Fixed { fixedOffset = start } Relative { relOffset = n } =
+  Fixed { fixedOffset = start + n }
+-- If the first is fixed and the second is a maximum, then we can
+-- figure out which is the larger.
+advanceWidth Fixed { fixedOffset = start } Maximum { maxFixed = fixed,
+                                                     maxRelative = rel } =
+  Fixed { fixedOffset = max fixed (start + rel) }
+-- If both are relative, just add them and make a new relative.
+advanceWidth Relative { relOffset = start } Relative { relOffset = n } =
+  Relative { relOffset = start + n }
+-- If we combine a relative and a maximum, then add the relative
+-- offset to the relative portion of the maximum
+advanceWidth Relative { relOffset = start } Maximum { maxFixed = fixed,
+                                                      maxRelative = n } =
+  maximum fixed (start + n)
+advanceWidth Maximum { maxFixed = fixed, maxRelative = rel }
+             Relative { relOffset = n } =
+  maximum fixed (rel + n)
+-- If both are a maximum, then the resulting relative portion is the
+-- sum of the two relative portions.  The resulting fixed portion is
+-- the greater of the second fixed portion, or the first fixed portion
+-- plus the second relative portion.
+advanceWidth Maximum { maxFixed = fixed1, maxRelative = rel1 }
+             Maximum { maxFixed = fixed2, maxRelative = rel2 } =
+  maximum (max fixed2 (fixed1 + rel2)) (rel1 + rel2)
+
+
 -- | A description of the ending.
 data Ending =
     -- | Ended with a newline, so do a full indent.
@@ -1353,43 +1386,13 @@ instance Monoid Render where
           then swidth1 + swidth2
           else swidth1
 
-      -- For the new ending width, advance the second ending width by
-      -- the first.
-      newewidth = case (ewidth1, ewidth2) of
-        -- If the second ending width is fixed, then it doesn't change
-        (_, f @ Fixed {}) -> f
-        -- If the first is fixed and the second is relative, then
-        -- advance the first by the relative offset, unless the first
-        -- document ends with a line.
-        (Fixed { fixedOffset = start }, Relative { relOffset = n }) ->
-          Fixed { fixedOffset = start + n }
-        -- If the first is fixed and the second is a maximum, then we can
-        -- figure out which is the larger.
-        (Fixed { fixedOffset = start }, Maximum { maxFixed = fixed,
-                                                  maxRelative = rel }) ->
-          Fixed { fixedOffset = max fixed (start + rel) }
-        -- If both are relative, just add them and make a new relative.
-        (Relative { relOffset = start }, Relative { relOffset = n }) ->
-          Relative { relOffset = start + n }
-        -- If we combine a relative and a maximum, then add the relative
-        -- offset to the relative portion of the maximum
-        (Relative { relOffset = start }, Maximum { maxFixed = fixed,
-                                                   maxRelative = n }) ->
-          maximum fixed (start + n)
-        (Maximum { maxFixed = fixed, maxRelative = rel },
-         Relative { relOffset = n }) ->
-          maximum fixed (rel + n)
-        -- If both are a maximum, then the resulting relative portion is the
-        -- sum of the two relative portions.  The resulting fixed portion is
-        -- the greater of the second fixed portion, or the first fixed portion
-        -- plus the second relative portion.
-        (Maximum { maxFixed = fixed1, maxRelative = rel1 },
-         Maximum { maxFixed = fixed2, maxRelative = rel2 }) ->
-          maximum (max fixed2 (fixed1 + rel2)) (rel1 + rel2)
+      newewidth = advanceWidth ewidth1 ewidth2
+      newwidth2 = advanceWidth ewidth1 width2
 
       -- The new width is the maximum of the two max width, the second
       -- end width, and the width of the newly-formed middle line.
-      newwidth = maxWidth (maxWidth newewidth midline) (maxWidth width1 width2)
+      newwidth = maxWidth (maxWidth newewidth midline)
+                          (maxWidth width1 newwidth2)
 
       out = Render { renderBuilder = newbuild, renderEnding = newend,
                      renderBegin = newbegin, renderLines = lines1 + lines2,
@@ -1665,13 +1668,13 @@ buildOptimal maxcol ansiterm doc =
         nestWidth r @ Relative {} = r
         -- For maximum widths, apply the same transform as for fixed
         -- to the fixed portion.
-        nestWidth m @ Maximum { maxFixed = n, maxRelative = rel } =
+        nestWidth Maximum { maxFixed = n, maxRelative = rel } =
           if alignnest
             -- If we're aligning, convert the width to relative, take
             -- the maximum of the two widths.
             then Relative { relOffset = max (n + lvl) rel }
             -- Otherwise just add on to the fixed width.
-            else m { maxFixed = n + lvl }
+            else maximum (n + lvl) (rel + lvl)
 
         updateRender :: Render -> Render
         updateRender r @ Render { renderBuilder = builder,
@@ -1717,14 +1720,10 @@ buildOptimal maxcol ansiterm doc =
               -- spaces.  Leave the column as-is.
               (False, False) -> (\sgr n c -> builder sgr (n + lvl) c,
                                  swidth, nesting + lvl)
-
-            out = r { renderBuilder = newbuilder,
-                      renderNesting = newnesting,
-                      renderStartWidth = newswidth,
-                      renderWidth = nestWidth width,
-                      renderEndWidth = nestWidth ewidth }
           in
-            debug ("    " ++ show out) out
+            r { renderBuilder = newbuilder, renderNesting = newnesting,
+                renderStartWidth = newswidth, renderWidth = nestWidth width,
+                renderEndWidth = nestWidth ewidth }
 
         res = build inner
       in case res of

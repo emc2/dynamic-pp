@@ -1255,6 +1255,8 @@ data Render =
   Render {
     -- | Starting line fragment width.
     renderStartWidth :: !Int,
+    -- | Number of extra spaces to generate.
+    renderNesting :: !Int,
     -- | Width: Number of columns at the widest point in the complete
     -- lines.
     renderWidth :: !Width,
@@ -1274,8 +1276,9 @@ instance Show Render where
   show Render { renderWidth = mwidth, renderStartWidth = swidth,
                 renderEndWidth = ewidth, renderLines = lns,
                 renderBuilder = builder, renderEnding = end,
-                renderBegin = begin } =
+                renderBegin = begin, renderNesting = nesting } =
     "Render { renderStartWidth = " ++ show swidth ++
+    ", renderNesting = " ++ show nesting ++
     ", renderWidth = " ++ show mwidth ++
     ", renderEndWidth = " ++ show ewidth ++
     ", renderLines = " ++ show lns ++
@@ -1287,13 +1290,24 @@ instance Show Render where
 instance Monoid Render where
   mempty = Render { renderStartWidth = 0, renderWidth = Relative 0,
                     renderEndWidth = Relative 0, renderEnding = mempty,
-                    renderBegin = mempty, renderLines = 0,
+                    renderNesting = 0, renderLines = 0, renderBegin = mempty,
                     renderBuilder = const mempty }
   mappend r1 r2
     | debug ("append\n  " ++ show r1 ++ "\n  " ++ show r2 ++ " =") False =
       undefined
+  mappend r1 @ Render { renderEnding = Newline }
+          r2 @ Render { renderBegin = Indent, renderNesting = nest2 }
+    | nest2 > 0 =
+      let
+        builder = const $! const $! const $! makespaces nest2
+        spaces = Render { renderEnding = Normal, renderStartWidth = nest2,
+                          renderNesting = 0, renderEndWidth = Relative nest2,
+                          renderBegin = Indent, renderWidth = Relative nest2,
+                          renderLines = 0, renderBuilder = builder }
+    in
+      r1 `mappend` spaces `mappend` r2 { renderNesting = 0 }
   mappend Render { renderBuilder = build1, renderEnding = end1,
-                   renderBegin = begin1,
+                   renderBegin = begin1, renderNesting = nest1,
                    renderLines = lines1, renderStartWidth = swidth1,
                    renderWidth = width1, renderEndWidth = ewidth1 }
           Render { renderBuilder = build2, renderEnding = end2,
@@ -1314,7 +1328,7 @@ instance Monoid Render where
         -- For a fixed width, we set the column to the offset
         (_, _, Fixed { fixedOffset = off }) ->
           \sgr n c -> build1 sgr n c `mappend` build2 sgr n (n + off)
-        -- For a relative offset, we addd the offset to the previous column.
+        -- For a relative offset, we add the offset to the previous column.
         (_, _, Relative { relOffset = off }) ->
           \sgr n c -> build1 sgr n c `mappend` build2 sgr n (c + off)
         -- For a maximum offset, we take the max.
@@ -1380,7 +1394,7 @@ instance Monoid Render where
       out = Render { renderBuilder = newbuild, renderEnding = newend,
                      renderBegin = newbegin, renderLines = lines1 + lines2,
                      renderStartWidth = newswidth, renderWidth = newwidth,
-                     renderEndWidth = newewidth }
+                     renderEndWidth = newewidth, renderNesting = nest1 }
     in
       debug ("    " ++ show out ++ "\n\n") out
 
@@ -1590,7 +1604,7 @@ buildOptimal maxcol ansiterm doc =
         Single { singleRender =
                     Render { renderEnding = Normal, renderBuilder = builder,
                              renderLines = 0, renderStartWidth = 1,
-                             renderWidth = Relative 1,
+                             renderWidth = Relative 1, renderNesting = 0,
                              renderEndWidth = Relative 1,
                              renderBegin = Indent } }
     build Content { contentString = txt, contentLength = len } =
@@ -1601,9 +1615,9 @@ buildOptimal maxcol ansiterm doc =
         -- equal to its length
        Single { singleRender =
                     Render { renderEnding = Normal, renderBuilder = builder,
-                             renderLines = 0, renderStartWidth = len,
+                             renderStartWidth = len, renderNesting = 0,
                              renderWidth = Relative len, renderBegin = Indent,
-                             renderEndWidth = Relative len } }
+                             renderLines = 0, renderEndWidth = Relative len } }
     build Line {} =
       let
         builder = const $! const $! const $! fromChar '\n'
@@ -1613,6 +1627,7 @@ buildOptimal maxcol ansiterm doc =
         --
         -- Note: the upper bound is adjusted elsewhere.
         Single { singleRender = Render { renderLines = 1,
+                                         renderNesting = 0,
                                          renderEnding = Newline,
                                          renderBegin = None,
                                          renderBuilder = builder,
@@ -1662,6 +1677,7 @@ buildOptimal maxcol ansiterm doc =
         updateRender r @ Render { renderBuilder = builder,
                                   renderStartWidth = swidth,
                                   renderWidth = width,
+                                  renderNesting = nesting,
                                   renderEndWidth = ewidth,
                                   renderBegin = begin } =
           let
@@ -1671,7 +1687,7 @@ buildOptimal maxcol ansiterm doc =
             addspaces = begin == Indent && not delay
             -- Wrap up the render functions in code that alters the
             -- nesting and column numbers.
-            (newbuilder, newswidth) = case (alignnest, addspaces) of
+            (newbuilder, newswidth, newnesting) = case (alignnest, addspaces) of
               -- We're aligning, and we need to add spaces.  Set the
               -- column and the nesting to the old column plus the
               -- offset.
@@ -1681,10 +1697,11 @@ buildOptimal maxcol ansiterm doc =
                 in
                   (\sgr _ c -> makespaces nspaces `mappend`
                                builder sgr (c + nspaces) (c + nspaces),
-                   swidth + nspaces)
+                   swidth + nspaces, 0)
               -- We're aligning, but don't need spaces.  Leave the
               -- column as is, and don't generate any spaces.
-              (True, False) -> (\sgr _ c -> builder sgr (c + lvl) c, swidth)
+              (True, False) -> (\sgr _ c -> builder sgr (c + lvl) c,
+                                swidth, 0)
               -- We're incrementing nesting and generating spaces.
               -- Generate a number of spaces equal to the max of zero
               -- or the difference.  Set the column to the greater of
@@ -1695,15 +1712,19 @@ buildOptimal maxcol ansiterm doc =
                 in
                   (\sgr n c -> makespaces nspaces `mappend`
                                builder sgr (n + lvl) (c + nspaces),
-                   swidth + nspaces)
+                   swidth + nspaces, nesting)
               -- We're incrementing nesting, but not generating
               -- spaces.  Leave the column as-is.
-              (False, False) -> (\sgr n c -> builder sgr (n + lvl) c, swidth)
+              (False, False) -> (\sgr n c -> builder sgr (n + lvl) c,
+                                 swidth, nesting + lvl)
+
+            out = r { renderBuilder = newbuilder,
+                      renderNesting = newnesting,
+                      renderStartWidth = newswidth,
+                      renderWidth = nestWidth width,
+                      renderEndWidth = nestWidth ewidth }
           in
-            r { renderBuilder = newbuilder,
-                renderStartWidth = newswidth,
-                renderWidth = nestWidth width,
-                renderEndWidth = nestWidth ewidth }
+            debug ("    " ++ show out) out
 
         res = build inner
       in case res of

@@ -196,11 +196,11 @@ import qualified Data.ByteString.Lazy as Lazy
 import qualified Data.ByteString.Lazy.Char8 as Lazy.Char8
 import qualified Data.ByteString.Lazy.UTF8 as Lazy.UTF8
 
-import Debug.Trace
+--import Debug.Trace
 
 debug :: String -> a -> a
-debug = trace
---debug _ = id
+--debug = trace
+debug _ = id
 
 -- | Datatype representing a formatted document.
 
@@ -1290,6 +1290,8 @@ data Render =
     renderStartWidth :: !Int,
     -- | Number of extra spaces to generate.
     renderNesting :: !Int,
+    -- | Minimum size of the first line.
+    renderMin :: !Int,
     -- | Width: Number of columns at the widest point in the complete
     -- lines.
     renderWidth :: !Width,
@@ -1309,9 +1311,11 @@ instance Show Render where
   show Render { renderWidth = mwidth, renderStartWidth = swidth,
                 renderEndWidth = ewidth, renderLines = lns,
                 renderBuilder = builder, renderEnding = end,
-                renderBegin = begin, renderNesting = nesting } =
+                renderBegin = begin, renderNesting = nesting,
+                renderMin = minwidth } =
     "Render { renderStartWidth = " ++ show swidth ++
     ", renderNesting = " ++ show nesting ++
+    ", renderMin = " ++ show minwidth ++
     ", renderWidth = " ++ show mwidth ++
     ", renderEndWidth = " ++ show ewidth ++
     ", renderLines = " ++ show lns ++
@@ -1324,27 +1328,31 @@ instance Monoid Render where
   mempty = Render { renderStartWidth = 0, renderWidth = Relative 0,
                     renderEndWidth = Relative 0, renderEnding = mempty,
                     renderNesting = 0, renderLines = 0, renderBegin = mempty,
-                    renderBuilder = const mempty }
+                    renderBuilder = const mempty, renderMin = 0 }
   mappend r1 r2
     | debug ("append\n  " ++ show r1 ++ "\n  " ++ show r2 ++ " =") False =
       undefined
   mappend r1 @ Render { renderEnding = Newline }
-          r2 @ Render { renderBegin = Indent, renderNesting = nest2 }
+          r2 @ Render { renderBegin = Indent, renderNesting = nest2,
+                        renderMin = min2 }
     | nest2 > 0 =
       let
         builder = const $! const $! const $! makespaces nest2
+        newmin = max 0 (min2 - nest2)
         spaces = Render { renderEnding = Normal, renderStartWidth = nest2,
-                          renderNesting = 0, renderEndWidth = Relative nest2,
                           renderBegin = Indent, renderWidth = Relative nest2,
-                          renderLines = 0, renderBuilder = builder }
+                          renderLines = 0, renderBuilder = builder,
+                          renderNesting = 0, renderMin = 0,
+                          renderEndWidth = Relative nest2 }
     in
-      r1 `mappend` spaces `mappend` r2 { renderNesting = 0 }
+      r1 `mappend` spaces `mappend` r2 { renderNesting = 0, renderMin = newmin }
   mappend Render { renderBuilder = build1, renderEnding = end1,
                    renderBegin = begin1, renderNesting = nest1,
                    renderLines = lines1, renderStartWidth = swidth1,
-                   renderWidth = width1, renderEndWidth = ewidth1 }
+                   renderWidth = width1, renderEndWidth = ewidth1,
+                   renderMin = min1 }
           Render { renderBuilder = build2, renderEnding = end2,
-                   renderBegin = begin2,
+                   renderBegin = begin2, renderMin = min2,
                    renderLines = lines2, renderStartWidth = swidth2,
                    renderWidth = width2, renderEndWidth = ewidth2 } =
     let
@@ -1375,16 +1383,21 @@ instance Monoid Render where
 
       -- Calculate the width of the middle line by adding the second
       -- start width onto the first ending width.
-      midline = case ewidth1 of
-        Fixed { fixedOffset = off } -> Fixed { fixedOffset = off + swidth2 }
-        Relative { relOffset = off } -> Relative { relOffset = off + swidth2 }
-        Maximum { maxFixed = fixed, maxRelative = rel } ->
-          maximum (fixed + swidth2) (rel + swidth2)
+      midline = case (ewidth1, min2) of
+        (Fixed { fixedOffset = off }, 0) ->
+          Fixed { fixedOffset = off + swidth2 }
+        (Fixed {}, mwidth) -> Fixed { fixedOffset = mwidth }
+        (Relative { relOffset = off }, 0) ->
+          Relative { relOffset = off + swidth2 }
+        (Relative { relOffset = off }, mwidth) ->
+          maximum mwidth (off + swidth2)
+        (Maximum { maxFixed = fixed, maxRelative = rel }, mwidth) ->
+          maximum (max mwidth (fixed + swidth2)) (rel + swidth2)
 
-      newswidth =
+      (newswidth, newmin) =
         if lines1 == 0
-          then swidth1 + swidth2
-          else swidth1
+          then (swidth1 + swidth2, max min1 min2)
+          else (swidth1, min1)
 
       newewidth = advanceWidth ewidth1 ewidth2
       newwidth2 = advanceWidth ewidth1 width2
@@ -1397,7 +1410,8 @@ instance Monoid Render where
       out = Render { renderBuilder = newbuild, renderEnding = newend,
                      renderBegin = newbegin, renderLines = lines1 + lines2,
                      renderStartWidth = newswidth, renderWidth = newwidth,
-                     renderEndWidth = newewidth, renderNesting = nest1 }
+                     renderEndWidth = newewidth, renderNesting = nest1,
+                     renderMin = newmin }
     in
       debug ("    " ++ show out ++ "\n\n") out
 
@@ -1436,11 +1450,13 @@ subsumesWidth _ _ = False
 subsumes :: Render -> Render -> Bool
 -- Simple comparisons: if the width is subsumed and the lines are less
 subsumes Render { renderWidth = width1, renderStartWidth = swidth1,
-                  renderLines = lines1, renderEndWidth = ewidth1 }
+                  renderLines = lines1, renderEndWidth = ewidth1,
+                  renderMin = min1 }
          Render { renderWidth = width2, renderStartWidth = swidth2,
-                  renderLines = lines2, renderEndWidth = ewidth2 } =
-  lines1 <= lines2 && swidth1 <= swidth2 && subsumesWidth width1 width2 &&
-  subsumesWidth ewidth1 ewidth2
+                  renderLines = lines2, renderEndWidth = ewidth2,
+                  renderMin = min2 } =
+  lines1 <= lines2 && swidth1 <= swidth2 && min1 <= min2 &&
+  subsumesWidth width1 width2 && subsumesWidth ewidth1 ewidth2
 
 newtype Frontier = Frontier { frontierRenders :: [Render] }
 
@@ -1608,7 +1624,7 @@ buildOptimal maxcol ansiterm doc =
                     Render { renderEnding = Normal, renderBuilder = builder,
                              renderLines = 0, renderStartWidth = 1,
                              renderWidth = Relative 1, renderNesting = 0,
-                             renderEndWidth = Relative 1,
+                             renderEndWidth = Relative 1, renderMin = 0,
                              renderBegin = Indent } }
     build Content { contentString = txt, contentLength = len } =
       let
@@ -1620,7 +1636,8 @@ buildOptimal maxcol ansiterm doc =
                     Render { renderEnding = Normal, renderBuilder = builder,
                              renderStartWidth = len, renderNesting = 0,
                              renderWidth = Relative len, renderBegin = Indent,
-                             renderLines = 0, renderEndWidth = Relative len } }
+                             renderLines = 0, renderMin = 0,
+                             renderEndWidth = Relative len } }
     build Line {} =
       let
         builder = const $! const $! const $! fromChar '\n'
@@ -1629,14 +1646,12 @@ buildOptimal maxcol ansiterm doc =
         -- upper-bound equal to the maximum column width.
         --
         -- Note: the upper bound is adjusted elsewhere.
-        Single { singleRender = Render { renderLines = 1,
-                                         renderNesting = 0,
-                                         renderEnding = Newline,
-                                         renderBegin = None,
-                                         renderBuilder = builder,
-                                         renderStartWidth = 0,
-                                         renderWidth = Fixed 0,
-                                         renderEndWidth = Fixed 0 } }
+        Single { singleRender =
+                    Render { renderLines = 1, renderNesting = 0,
+                             renderEnding = Newline, renderBegin = None,
+                             renderBuilder = builder, renderStartWidth = 0,
+                             renderMin = 0, renderWidth = Fixed 0,
+                             renderEndWidth = Fixed 0 } }
     -- This is for an empty cat, ie. the empty document
     build Cat { catDocs = [] } = mempty
     build Cat { catDocs = first : rest } =
@@ -1679,6 +1694,7 @@ buildOptimal maxcol ansiterm doc =
         updateRender :: Render -> Render
         updateRender r @ Render { renderBuilder = builder,
                                   renderStartWidth = swidth,
+                                  renderMin = minwidth,
                                   renderWidth = width,
                                   renderNesting = nesting,
                                   renderEndWidth = ewidth,
@@ -1690,7 +1706,8 @@ buildOptimal maxcol ansiterm doc =
             addspaces = begin == Indent && not delay
             -- Wrap up the render functions in code that alters the
             -- nesting and column numbers.
-            (newbuilder, newswidth, newnesting) = case (alignnest, addspaces) of
+            (newbuilder, newswidth, newnesting, newmin) =
+              case (alignnest, addspaces) of
               -- We're aligning, and we need to add spaces.  Set the
               -- column and the nesting to the old column plus the
               -- offset.
@@ -1700,30 +1717,30 @@ buildOptimal maxcol ansiterm doc =
                 in
                   (\sgr _ c -> makespaces nspaces `mappend`
                                builder sgr (c + nspaces) (c + nspaces),
-                   swidth + nspaces, 0)
+                   swidth + nspaces, 0, minwidth - nspaces)
               -- We're aligning, but don't need spaces.  Leave the
               -- column as is, and don't generate any spaces.
               (True, False) -> (\sgr _ c -> builder sgr (c + lvl) c,
-                                swidth, 0)
+                                swidth, 0, minwidth)
               -- We're incrementing nesting and generating spaces.
               -- Generate a number of spaces equal to the max of zero
               -- or the difference.  Set the column to the greater of
               -- the current column or the nesting.
               (False, True) ->
-                let
-                  nspaces = max 0 lvl
-                in
-                  (\sgr n c -> makespaces nspaces `mappend`
-                               builder sgr (n + lvl) (c + nspaces),
-                   swidth + nspaces, nesting)
+                (\sgr n c ->
+                  if c < lvl
+                    then makespaces (lvl - c) `mappend`
+                         builder sgr (n + lvl) lvl
+                    else builder sgr (n + lvl) c,
+                 swidth, nesting, lvl + swidth)
               -- We're incrementing nesting, but not generating
               -- spaces.  Leave the column as-is.
               (False, False) -> (\sgr n c -> builder sgr (n + lvl) c,
-                                 swidth, nesting + lvl)
+                                 swidth, nesting + lvl, minwidth)
           in
             r { renderBuilder = newbuilder, renderNesting = newnesting,
                 renderStartWidth = newswidth, renderWidth = nestWidth width,
-                renderEndWidth = nestWidth ewidth }
+                renderEndWidth = nestWidth ewidth, renderMin = newmin }
 
         res = build inner
       in case res of
@@ -1749,10 +1766,9 @@ buildOptimal maxcol ansiterm doc =
           -- Insert graphics control characters without updating
           -- column numbers, as they aren't visible.
           wrapBuilder r @ Render { renderBuilder = builder } =
-            r { renderBuilder = \sgr1 n c ->
-                                  switchGraphics sgr1 sgr2 `mappend`
-                                  builder sgr2 n c `mappend`
-                                  switchGraphics sgr2 sgr1 }
+            r { renderBuilder = \sgr1 n c -> switchGraphics sgr1 sgr2 `mappend`
+                                             builder sgr2 n c `mappend`
+                                             switchGraphics sgr2 sgr1 }
         in case build inner of
           s @ Single { singleRender = render } ->
             s { singleRender = wrapBuilder render }

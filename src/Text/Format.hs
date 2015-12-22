@@ -171,12 +171,10 @@ module Text.Format(
        renderFast,
        buildFast,
        putFast,
-       {-
        -- ** Greedy (Wadler-Leijin style) Render
        renderGreedy,
        buildGreedy,
        putGreedy,
--}
        -- ** Optimal Render
        renderOptimal,
        buildOptimal,
@@ -1497,7 +1495,7 @@ overrun maxcol Maximum { maxFixed = fixed, maxRelative = rel } =
     highest = max fixed rel
   in
     if highest > maxcol then highest - maxcol else 0
-{-
+
 -- | Produce a 'Builder' that renders the 'Doc' using the greedy
 -- layout engine.
 buildGreedy :: Int
@@ -1514,9 +1512,9 @@ buildGreedy maxcol ansiterm doc =
     -- renderer, but without the frontier.
     build :: Graphics -> Column -> Ending -> Doc -> Render
     -- For char, bytestring, and lazy bytestring,
-    build _ _ end Char { charContent = chr } =
+    build _ _ _ Char { charContent = chr } =
       let
-        builder = contentBuilder end (fromChar chr)
+        builder = contentBuilder (fromChar chr)
       in
         -- Single characters have a single possibility, a relative
         -- ending position one beyond the start, and an upper-bound
@@ -1524,9 +1522,9 @@ buildGreedy maxcol ansiterm doc =
         Render { renderEnding = Normal, renderBuilder = builder,
                  renderCol = Relative 1, renderLines = 0,
                  renderWidth = Relative 1 }
-    build _ _ end Content { contentString = txt, contentLength = len } =
+    build _ _ _ Content { contentString = txt, contentLength = len } =
       let
-        builder = contentBuilder end (fromLazyByteString txt)
+        builder = contentBuilder (fromLazyByteString txt)
       in
         -- Text has a single possibility and a relative ending position
         -- equal to its length
@@ -1540,22 +1538,17 @@ buildGreedy maxcol ansiterm doc =
       -- Note: the upper bound is adjusted elsewhere.
       Render { renderEnding = Newline, renderLines = 1,
                renderCol = nesting, renderWidth = nesting,
-               renderBuilder = const $! const $! fromChar '\n' }
-    build _ _ Cat { catDocs = [] } = mempty
-    build sgr nesting ind Cat { catDocs = first : rest } =
+               renderBuilder = const $! const $! const $! fromChar '\n' }
+    build _ _ _ Cat { catDocs = [] } = mempty
+    build sgr nesting end Cat { catDocs = first : rest } =
       let
         -- Glue two Results together.  This gets used in a fold.
         appendResults :: Render -> Doc -> Render
         -- The accumulated result is a Single.
-        appendResults render1 @ Render { renderEnding = end' } doc' =
-          let
-            -- Render the document.
-            render2 = build sgr nesting end' doc'
-          in
-            render1 `mappend` render2
+        appendResults res1 = mappend res1 . build sgr nesting end
 
         -- Build the first item
-        firstres = build sgr nesting ind first
+        firstres = build sgr nesting end first
       in
         -- Fold them all together with appendResults
         foldl appendResults firstres rest
@@ -1571,10 +1564,10 @@ buildGreedy maxcol ansiterm doc =
             -- new nesting equal to the current column, plus an
             -- offset.
             then \r @ Render { renderBuilder = builder } ->
-                   r { renderBuilder = \_ c -> builder (c + lvl) c }
+                   r { renderBuilder = \end _ c -> builder end (c + lvl) c }
             -- Otherwise, make it relative to the current nesting level.
             else \r @ Render { renderBuilder = builder } ->
-                   r { renderBuilder = \n c -> builder (n + lvl) c }
+                   r { renderBuilder = \end n c -> builder end (n + lvl) c }
 
         -- If we delay the indentation, don't alter the indent mode,
         -- otherwise, set it.
@@ -1617,9 +1610,9 @@ buildGreedy maxcol ansiterm doc =
         in
           -- Insert graphics control characters without updating
           -- column numbers, as they aren't visible.
-         r { renderBuilder = \n c -> switchGraphics sgr1 sgr2 `mappend`
-                                     builder n c `mappend`
-                                     switchGraphics sgr2 sgr1 }
+         r { renderBuilder = \end n c -> switchGraphics sgr1 sgr2 `mappend`
+                                         builder end n c `mappend`
+                                         switchGraphics sgr2 sgr1 }
       -- Otherwise, skip it entirely
       | otherwise = build sgr2 nesting ind inner
 
@@ -1627,7 +1620,7 @@ buildGreedy maxcol ansiterm doc =
     Render { renderBuilder = result } =
       build Default Fixed { fixedOffset = 0 } Normal doc
   in
-    result 0 0
+    result Newline 0 0
 
 -- | Render a 'Doc' as a lazy bytestring using a greedy layout
 -- rendering engine.  This engine is roughly equivalent to the
@@ -1654,7 +1647,7 @@ putGreedy :: Handle
            -> IO ()
 putGreedy handle cols color =
   toByteStringIO (Strict.hPut handle) . buildGreedy cols color
--}
+
 -- | Produce a 'Builder' that renders the 'Doc' using the optimal
 -- layout engine.
 

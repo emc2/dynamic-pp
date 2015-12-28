@@ -209,8 +209,6 @@ debug :: String -> a -> a
 --debug = trace
 debug _ = id
 
--- | Datatype representing a formatted document.
-
 data LineKind =
     -- | Unerasable linebreak
     Hard
@@ -224,6 +222,8 @@ data LineKind =
 -- formatting of the generated text.  These are rendered by the
 -- various rendering engines into a Builder (from the blaze-builder
 -- library).
+
+-- | Datatype representing a formatted document.
 data Doc =
     -- | A single character.  Cannot be a newline.
     Char { charContent :: !Char }
@@ -1510,9 +1510,9 @@ buildGreedy maxcol ansiterm doc =
   let
     -- This uses pretty much the same framework as the optimal
     -- renderer, but without the frontier.
-    build :: Graphics -> Column -> Ending -> Doc -> Render
+    build :: Graphics -> Column -> Doc -> Render
     -- For char, bytestring, and lazy bytestring,
-    build _ _ _ Char { charContent = chr } =
+    build _ _ Char { charContent = chr } =
       let
         builder = contentBuilder (fromChar chr)
       in
@@ -1522,7 +1522,7 @@ buildGreedy maxcol ansiterm doc =
         Render { renderEnding = Normal, renderBuilder = builder,
                  renderCol = Relative 1, renderLines = 0,
                  renderWidth = Relative 1 }
-    build _ _ _ Content { contentString = txt, contentLength = len } =
+    build _ _ Content { contentString = txt, contentLength = len } =
       let
         builder = contentBuilder (fromLazyByteString txt)
       in
@@ -1531,7 +1531,7 @@ buildGreedy maxcol ansiterm doc =
        Render { renderLines = 0, renderWidth = Relative len,
                 renderBuilder = builder, renderCol = Relative len,
                 renderEnding = Normal }
-    build _ nesting _ Line {} =
+    build _ nesting Line {} =
       -- A newline starts at the nesting level, has no overrun, and an
       -- upper-bound equal to the maximum column width.
       --
@@ -1539,74 +1539,78 @@ buildGreedy maxcol ansiterm doc =
       Render { renderEnding = Newline, renderLines = 1,
                renderCol = nesting, renderWidth = nesting,
                renderBuilder = const $! const $! const $! fromChar '\n' }
-    build _ _ _ Cat { catDocs = [] } = mempty
-    build sgr nesting end Cat { catDocs = first : rest } =
+    build _ _ Cat { catDocs = [] } = mempty
+    build sgr nesting Cat { catDocs = first : rest } =
       let
         -- Glue two Results together.  This gets used in a fold.
         appendResults :: Render -> Doc -> Render
         -- The accumulated result is a Single.
-        appendResults res1 = mappend res1 . build sgr nesting end
+        appendResults res1 = mappend res1 . build sgr nesting
 
         -- Build the first item
-        firstres = build sgr nesting end first
+        firstres = build sgr nesting first
       in
         -- Fold them all together with appendResults
         foldl appendResults firstres rest
-    build sgr nesting ind Nest { nestDelay = delay, nestDoc = inner,
-                                 nestAlign = alignnest,
-                                 nestLevel = lvl } =
+    build sgr nesting Nest { nestDelay = delay, nestDoc = inner,
+                             nestAlign = alignnest,
+                             nestLevel = lvl } =
       let
         -- Wrap up the render functions in code that alters the
         -- nesting and column numbers.
-        updateRender =
-          if alignnest
+        updateRender r @ Render { renderBuilder = builder } =
+          case (alignnest, delay) of
             -- If we're relative to the current column, then make the
             -- new nesting equal to the current column, plus an
             -- offset.
-            then \r @ Render { renderBuilder = builder } ->
-                   r { renderBuilder = \end _ c -> builder end (c + lvl) c }
+            (True, True) ->
+              r { renderBuilder = \end _ c -> builder end (c + lvl) c }
+            (True, False) ->
+              r { renderBuilder = \_ _ c -> builder Indent (c + lvl) c }
             -- Otherwise, make it relative to the current nesting level.
-            else \r @ Render { renderBuilder = builder } ->
-                   r { renderBuilder = \end n c -> builder end (n + lvl) c }
-
-        -- If we delay the indentation, don't alter the indent mode,
-        -- otherwise, set it.
-        newindent = if delay then ind else Indent
+            (False, True) ->
+              r { renderBuilder = \end n c -> builder end (n + lvl) c }
+            (False, False) ->
+              r { renderBuilder = \_ n c -> builder Indent (n + lvl) c }
 
         res =
           if alignnest
             -- If we're aligning to the current column, the nesting
             -- becomes a relative offset.
-            then build sgr (Relative lvl) newindent inner
+            then build sgr (Relative lvl) inner
             -- Otherwise, we have to update the nesting level.
             else
               let
                 -- Basically, increment everything by the nesting level.
                 newnesting = case nesting of
                   Fixed { fixedOffset = n } -> Fixed { fixedOffset = n + lvl }
-                  Relative { relOffset = n } -> Relative { relOffset = n + lvl }
+                  Relative { relOffset = n } ->
+                    if alignnest
+                      then Relative { relOffset = lvl }
+                      else Relative { relOffset = n + lvl }
                   Maximum { maxFixed = fixed, maxRelative = rel } ->
                     Maximum { maxFixed = fixed + lvl, maxRelative = rel + lvl }
               in
-                build sgr newnesting newindent inner
+                build sgr newnesting inner
       in
         updateRender res
-    build sgr nesting ind Choose { chooseOptions = options } =
+    build sgr nesting Choose { chooseOptions = options } =
       let
         greedy [] = error "Should not see empty Choose"
-        greedy [only] = build sgr nesting ind only
+        greedy [only] = build sgr nesting only
         greedy (first : rest) =
           let
-            r @ Render { renderWidth = width } = build sgr nesting ind first
+            r = build sgr nesting first
+            Render { renderWidth = width } = debug (show r) r
           in
-            if overrun maxcol width /= 0 then r else greedy rest
+            if overrun maxcol width == 0 then r else greedy rest
       in
         greedy options
-    build sgr1 nesting ind Graphics { graphicsSGR = sgr2, graphicsDoc = inner }
+    build sgr1 nesting Graphics { graphicsSGR = sgr2, graphicsDoc = inner }
       -- Only do graphics if the ansiterm flag is set.
       | ansiterm =
         let
-          r @ Render { renderBuilder = builder } = build sgr2 nesting ind inner
+          r @ Render { renderBuilder = builder } = build sgr2 nesting inner
         in
           -- Insert graphics control characters without updating
           -- column numbers, as they aren't visible.
@@ -1614,11 +1618,11 @@ buildGreedy maxcol ansiterm doc =
                                          builder end n c `mappend`
                                          switchGraphics sgr2 sgr1 }
       -- Otherwise, skip it entirely
-      | otherwise = build sgr2 nesting ind inner
+      | otherwise = build sgr2 nesting inner
 
     -- Call build, extract the result.
     Render { renderBuilder = result } =
-      build Default Fixed { fixedOffset = 0 } Normal doc
+      build Default Fixed { fixedOffset = 0 } doc
   in
     result Newline 0 0
 

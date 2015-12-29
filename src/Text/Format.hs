@@ -38,9 +38,11 @@
 -- removed.
 module Text.Format(
        -- * Basic Definitions
+
        -- ** Types
        Doc,
        Graphics(..),
+
        -- ** Type Classes
        Format(..),
        FormatM(..),
@@ -130,6 +132,10 @@ module Text.Format(
        vividCyanBackground,
        vividMagentaBackground,
        vividBlackBackground,
+       bold,
+       debold,
+       underline,
+       deunderline,
 
        -- ** Combining @Doc@s
 
@@ -163,18 +169,26 @@ module Text.Format(
        group,
 
        -- * Rendering @Doc@s
+
        -- ** Single-Line Render
        renderOneLine,
        buildOneLine,
        putOneLine,
+
        -- ** Fast Render
        renderFast,
        buildFast,
        putFast,
+
        -- ** Optimal Render
        renderOptimal,
        buildOptimal,
-       putOptimal
+       putOptimal,
+
+       -- ** Greedy Render
+       renderGreedy,
+       buildGreedy,
+       putGreedy
        ) where
 
 import Blaze.ByteString.Builder
@@ -182,9 +196,9 @@ import Blaze.ByteString.Builder.Char.Utf8
 import Control.Arrow((***))
 import Control.Monad
 import Data.Hashable
-import Data.List(intersperse, minimumBy, sort)
+import Data.List(intersperse, minimumBy, sort, sortBy)
 import Data.Maybe
-import Data.Monoid hiding ((<>))
+import Data.Monoid
 import Data.Word
 import Prelude hiding ((<$>), concat, maximum, minimum)
 import System.Console.ANSI
@@ -263,6 +277,11 @@ data Doc =
     }
     deriving (Eq, Show)
 
+instance Monoid Doc where
+  mempty = empty
+  mappend = beside
+  mconcat = concat
+
 -- | Graphics options for ANSI terminals.  All options are wrapped in
 -- the 'Maybe' datatype, with 'Nothing' meaning \"leave this option
 -- as-is\".
@@ -313,7 +332,7 @@ instance Monoid Graphics where
                                            swap @ (Just _) -> swap
                                            Nothing -> swap2,
               underlining = case underline1 of
-                              underline @ (Just _) -> underline
+                              uline @ (Just _) -> uline
                               Nothing -> underline2,
               foreground = case fore1 of
                              fore @ (Just _) -> fore
@@ -387,13 +406,13 @@ instance Hashable Doc where
 instance Hashable Graphics where
   hashWithSalt s Options { consoleIntensity = consIntensity,
                            swapForegroundBackground = swap,
-                           underlining = underline,
+                           underlining = uline,
                            foreground = fore,
                            background = back,
                            blinkSpeed = blink } =
     s `hashWithSalt` (0 :: Int) `hashWithSalt`
     fmap fromEnum consIntensity `hashWithSalt`
-    fmap fromEnum swap `hashWithSalt` fmap fromEnum underline `hashWithSalt`
+    fmap fromEnum swap `hashWithSalt` fmap fromEnum uline `hashWithSalt`
     fmap (fromEnum *** fromEnum) fore `hashWithSalt`
     fmap (fromEnum *** fromEnum) back `hashWithSalt` fmap fromEnum blink
   hashWithSalt s Default = s `hashWithSalt` (1 :: Int)
@@ -403,7 +422,7 @@ switchGraphics :: Graphics -> Graphics -> Builder
 switchGraphics _ Default = fromString (setSGRCode [Reset])
 switchGraphics Default Options { consoleIntensity = consIntensity,
                                  swapForegroundBackground = swap,
-                                 underlining = underline,
+                                 underlining = uline,
                                  foreground = fore,
                                  background = back,
                                  blinkSpeed = blink } =
@@ -411,7 +430,7 @@ switchGraphics Default Options { consoleIntensity = consIntensity,
     withConsIntensity = maybe [] ((: []) . SetConsoleIntensity) consIntensity
     withUnderline = maybe withConsIntensity ((: withConsIntensity) .
                                              SetUnderlining)
-                          underline
+                          uline
     withBlink = maybe withUnderline ((: withUnderline) . SetBlinkSpeed) blink
     withSwap = maybe withBlink ((: withBlink) . SetSwapForegroundBackground)
                      swap
@@ -647,6 +666,8 @@ angles = enclose langle rangle
 
 -- | Set the graphics mode on a document.
 graphics :: Graphics -> Doc -> Doc
+graphics sgr1 Graphics { graphicsDoc = doc, graphicsSGR = sgr2 } =
+  Graphics { graphicsDoc = doc, graphicsSGR = sgr1 <> sgr2 }
 graphics sgr doc = Graphics { graphicsDoc = doc, graphicsSGR = sgr }
 
 -- | Color a 'Doc' dull white.
@@ -937,33 +958,65 @@ vividBlackBackground = graphics Options { consoleIntensity = Nothing,
                                           foreground = Nothing,
                                           swapForegroundBackground = Nothing }
 
--- | Join two 'Doc's with no space in between.
-(<>) :: Doc -> Doc -> Doc
-(<>) = beside
+-- | Set the terminal to bold.
+bold :: Doc -> Doc
+bold = graphics Options { consoleIntensity = Just BoldIntensity,
+                          underlining = Nothing,
+                          blinkSpeed = Nothing,
+                          background = Nothing,
+                          foreground = Nothing,
+                          swapForegroundBackground = Nothing }
+
+-- | Unset the terminal from bold.
+debold :: Doc -> Doc
+debold = graphics Options { consoleIntensity = Just NormalIntensity,
+                            underlining = Nothing,
+                            blinkSpeed = Nothing,
+                            background = Nothing,
+                            foreground = Nothing,
+                            swapForegroundBackground = Nothing }
+
+-- | Unset the terminal from bold.
+underline :: Doc -> Doc
+underline = graphics Options { consoleIntensity = Nothing,
+                               underlining = Just SingleUnderline,
+                               blinkSpeed = Nothing,
+                               background = Nothing,
+                               foreground = Nothing,
+                               swapForegroundBackground = Nothing }
+
+-- | Unset the terminal from bold.
+deunderline :: Doc -> Doc
+deunderline = graphics Options { consoleIntensity = Nothing,
+                                 underlining = Just NoUnderline,
+                                 blinkSpeed = Nothing,
+                                 background = Nothing,
+                                 foreground = Nothing,
+                                 swapForegroundBackground = Nothing }
 
 -- | Join two 'Doc's with a space in between them.
 (<+>) :: Doc -> Doc -> Doc
-left <+> right = left <> space <> right
+left <+> right = concat [left, space, right]
 
 -- | Join two 'Doc's with a 'hardline' in between them.
 (<!>) :: Doc -> Doc -> Doc
-left <!> right = left <> hardline <> right
+left <!> right = concat [left, hardline, right]
 
 -- | Join two 'Doc's with a 'line' in between them.
 (<$>) :: Doc -> Doc -> Doc
-left <$> right = left <> line <> right
+left <$> right = concat [left, line, right]
 
 -- | Join two 'Doc's with a 'linebreak' in between them.
 (<$$>) :: Doc -> Doc -> Doc
-left <$$> right = left <> linebreak <> right
+left <$$> right = concat [left, linebreak, right]
 
 -- | Join two 'Doc's with a 'softline' in between them.
 (</>) :: Doc -> Doc -> Doc
-left </> right = left <> softline <> right
+left </> right = concat [left, softline, right]
 
 -- | Join two 'Doc's with a 'softbreak' in between them.
 (<//>) :: Doc -> Doc -> Doc
-left <//> right = left <> softbreak <> right
+left <//> right = concat [left, softbreak, right]
 
 -- | Joun 'Doc's with no space in between them.
 beside :: Doc -> Doc -> Doc
@@ -1118,347 +1171,71 @@ putFast :: Handle -> Doc -> IO ()
 putFast handle =
   toByteStringIO (Strict.hPut handle) . buildFast
 
--- | Width data type.  Represents the width of a document.
---
--- Widths can be fixed, relative, or the maximum of the two.  Fixed
--- means "this width exactly".  Relative widths are increased every
--- time something is prepended to the first line of a document.
--- Maximum means "relative, but no less than a fixed amount".
-data Width =
-    -- | An absolute column offset.
-    Fixed { fixedOffset :: !Int }
-    -- | A relative column offset.
-  | Relative { relOffset :: !Int }
-    -- | The greater of a relative column offset and an absolute
-    -- column offset.
-  | Maximum {
-      -- | This many columns offset from a relative point.
-      maxRelative :: !Int,
-      -- | But not less than this value.
-      maxFixed :: !Int
-    }
-    deriving Show
-
-instance Hashable Width where
-  hashWithSalt s Fixed { fixedOffset = n } =
-    s `hashWithSalt` (0 :: Int) `hashWithSalt` n
-  hashWithSalt s Relative { relOffset = n } =
-    s `hashWithSalt` (1 :: Int) `hashWithSalt` n
-  hashWithSalt s Maximum { maxFixed = fixed, maxRelative = rel } =
-    s `hashWithSalt` (2 :: Int) `hashWithSalt` fixed `hashWithSalt` rel
-
-instance Ord Width where
-  compare Fixed { fixedOffset = n1 } Fixed { fixedOffset = n2 } = compare n1 n2
-  compare Fixed { fixedOffset = n }
-          Maximum { maxFixed = fixed, maxRelative = rel } =
-    case compare n fixed of
-      EQ -> case compare n rel of
-        EQ -> LT
-        out -> out
-      out -> out
-  compare Fixed { fixedOffset = n1 } Relative { relOffset = n2 } =
-    case compare n1 n2 of
-      EQ -> LT
-      out -> out
-  compare m @ Maximum {} f @ Fixed {} =
-    case compare f m of
-      LT -> GT
-      EQ -> EQ
-      GT -> LT
-  compare Maximum { maxFixed = fixed1, maxRelative = rel1 }
-          Maximum { maxFixed = fixed2, maxRelative = rel2 } =
-    case compare fixed1 fixed2 of
-      EQ -> compare rel1 rel2
-      out -> out
-  compare Maximum { maxFixed = fixed, maxRelative = rel }
-          Relative { relOffset = n } =
-    case compare rel n of
-      EQ -> case compare fixed n of
-        EQ -> GT
-        out -> out
-      out -> out
-  compare r @ Relative {} f @ Fixed {} =
-    case compare f r of
-      LT -> GT
-      EQ -> EQ
-      GT -> LT
-  compare r @ Relative {} m @ Maximum {} =
-    case compare m r of
-      LT -> GT
-      EQ -> EQ
-      GT -> LT
-  compare Relative { relOffset = n1 } Relative { relOffset = n2 } =
-    compare n1 n2
-
-instance Eq Width where
-  c1 == c2 = compare c1 c2 == EQ
-
-maximum :: Int -> Int -> Width
-maximum fixed rel
-  | rel >= fixed = Relative { relOffset = rel }
-  | otherwise = Maximum { maxFixed = fixed, maxRelative = rel }
-
-maxWidth :: Width -> Width -> Width
-maxWidth Fixed { fixedOffset = n1 } Fixed { fixedOffset = n2 } =
-  Fixed { fixedOffset = max n1 n2 }
-maxWidth Fixed { fixedOffset = fixed } Relative { relOffset = rel } =
-  maximum fixed rel
-maxWidth r @ Relative {} f @ Fixed {} = maxWidth f r
-maxWidth Fixed { fixedOffset = fixed1 }
-         Maximum { maxFixed = fixed2, maxRelative = rel } =
-  maximum (max fixed1 fixed2) rel
-maxWidth m @ Maximum {} f @ Fixed {} = maxWidth f m
-maxWidth Relative { relOffset = rel1 } Relative { relOffset = rel2 } =
-  Relative { relOffset = max rel1 rel2 }
-maxWidth Relative { relOffset = rel1 }
-         Maximum { maxFixed = fixed, maxRelative = rel2 } =
-  maximum fixed (max rel1 rel2)
-maxWidth m @ Maximum {} r @ Relative {} = maxWidth r m
-maxWidth Maximum { maxFixed = fix1, maxRelative = rel1 }
-         Maximum { maxFixed = fix2, maxRelative = rel2 } =
-  maximum (max fix1 fix2) (max rel1 rel2)
-
-advanceWidth :: Width -> Width -> Width
--- If the second ending width is fixed, then it doesn't change
-advanceWidth _ f @ Fixed {} = f
--- If the first is fixed and the second is relative, then
--- advance the first by the relative offset, unless the first
--- document ends with a line.
-advanceWidth Fixed { fixedOffset = start } Relative { relOffset = n } =
-  Fixed { fixedOffset = start + n }
--- If the first is fixed and the second is a maximum, then we can
--- figure out which is the larger.
-advanceWidth Fixed { fixedOffset = start } Maximum { maxFixed = fixed,
-                                                     maxRelative = rel } =
-  Fixed { fixedOffset = max fixed (start + rel) }
--- If both are relative, just add them and make a new relative.
-advanceWidth Relative { relOffset = start } Relative { relOffset = n } =
-  Relative { relOffset = start + n }
--- If we combine a relative and a maximum, then add the relative
--- offset to the relative portion of the maximum
-advanceWidth Relative { relOffset = start } Maximum { maxFixed = fixed,
-                                                      maxRelative = n } =
-  maximum fixed (start + n)
-advanceWidth Maximum { maxFixed = fixed, maxRelative = rel }
-             Relative { relOffset = n } =
-  maximum fixed (rel + n)
--- If both are a maximum, then the resulting relative portion is the
--- sum of the two relative portions.  The resulting fixed portion is
--- the greater of the second fixed portion, or the first fixed portion
--- plus the second relative portion.
-advanceWidth Maximum { maxFixed = fixed1, maxRelative = rel1 }
-             Maximum { maxFixed = fixed2, maxRelative = rel2 } =
-  maximum (max fixed2 (fixed1 + rel2)) (rel1 + rel2)
-
-
 -- | A description of the ending.
 data Ending =
     -- | Ended with a newline, so do a full indent.
-    Newline
-    -- | Ended with normal content, so no indent.
-  | Normal
-    -- | Take the previous document's ending.
-  | Prev
-    deriving (Eq, Show)
-
-instance Monoid Ending where
-  mempty = Prev
-
-  mappend end Prev = end
-  mappend _ end = end
-
--- | A description of the indentation required.
-data Begin =
-    -- | begins with content, so indentation is needed.
     Indent
-    -- | Begins with a newline, so do not indent.
+    -- | Ended with normal content, so no indent.
   | None
-    -- | Take the next documents beginning.
-  | Next
     deriving (Eq, Show)
-
-instance Monoid Begin where
-  mempty = Next
-
-  mappend Next begin = begin
-  mappend begin _ = begin
 
 -- | A rendering of a document.
 data Render =
   Render {
-    -- | Starting line fragment width.
-    renderStartWidth :: !Int,
     -- | Number of extra spaces to generate.
     renderNesting :: !Int,
-    -- | Minimum size of the first line.
-    renderMin :: !Int,
     -- | Width: Number of columns at the widest point in the complete
     -- lines.
-    renderWidth :: !Width,
+    renderWidth :: !Int,
     -- | Ending line fragment width.
-    renderEndWidth :: !Width,
+    renderEndWidth :: !Int,
     -- | The number of lines in the document.
     renderLines :: !Word,
     -- | A builder that constructs the document.
-    renderBuilder :: !(Graphics -> Int -> Int -> Builder),
+    renderBuilder :: Builder,
     -- | Indentation mode for the next document.
     renderEnding :: !Ending,
-    -- | Whether or not the builder needs indentation inserted before.
-    renderBegin :: !Begin
+    -- | Finish function.  Allows for resetting of some state when
+    -- done with an inner document.
+    renderFinish :: !(Render -> Render)
   }
 
 instance Show Render where
-  show Render { renderWidth = mwidth, renderStartWidth = swidth,
-                renderEndWidth = ewidth, renderLines = lns,
-                renderBuilder = builder, renderEnding = end,
-                renderBegin = begin, renderNesting = nesting,
-                renderMin = minwidth } =
-    "Render { renderStartWidth = " ++ show swidth ++
-    ", renderNesting = " ++ show nesting ++
-    ", renderMin = " ++ show minwidth ++
+  show Render { renderWidth = mwidth, renderEndWidth = ewidth,
+                renderLines = lns, renderBuilder = builder,
+                renderEnding = end, renderNesting = nesting } =
+    "Render { renderNesting = " ++ show nesting ++
     ", renderWidth = " ++ show mwidth ++
     ", renderEndWidth = " ++ show ewidth ++
     ", renderLines = " ++ show lns ++
     ", renderEnding = " ++ show end ++
-    ", renderBegin = " ++ show begin ++
-    ", renderBuilder = " ++ show (toLazyByteString (builder Default 0 0)) ++
+    ", renderBuilder = " ++ show (toLazyByteString builder) ++
     " }"
-
-instance Monoid Render where
-  mempty = Render { renderStartWidth = 0, renderWidth = Relative 0,
-                    renderEndWidth = Relative 0, renderEnding = mempty,
-                    renderNesting = 0, renderLines = 0, renderBegin = mempty,
-                    renderBuilder = const mempty, renderMin = 0 }
-  mappend r1 r2
-    | debug ("append\n  " ++ show r1 ++ "\n  " ++ show r2 ++ " =") False =
-      undefined
-  mappend r1 @ Render { renderEnding = Newline }
-          r2 @ Render { renderBegin = Indent, renderNesting = nest2,
-                        renderMin = min2 }
-    | nest2 > 0 =
-      let
-        builder = const $! const $! const $! makespaces nest2
-        newmin = max 0 (min2 - nest2)
-        spaces = Render { renderEnding = Normal, renderStartWidth = nest2,
-                          renderBegin = Indent, renderWidth = Relative nest2,
-                          renderLines = 0, renderBuilder = builder,
-                          renderNesting = 0, renderMin = 0,
-                          renderEndWidth = Relative nest2 }
-    in
-      r1 `mappend` spaces `mappend` r2 { renderNesting = 0, renderMin = newmin }
-  mappend Render { renderBuilder = build1, renderEnding = end1,
-                   renderBegin = begin1, renderNesting = nest1,
-                   renderLines = lines1, renderStartWidth = swidth1,
-                   renderWidth = width1, renderEndWidth = ewidth1,
-                   renderMin = min1 }
-          Render { renderBuilder = build2, renderEnding = end2,
-                   renderBegin = begin2, renderMin = min2,
-                   renderLines = lines2, renderStartWidth = swidth2,
-                   renderWidth = width2, renderEndWidth = ewidth2 } =
-    let
-      newbuild = case (end1, begin2, ewidth1) of
-        -- We end with a newline, and begin with content.  Do
-        -- indentation.  Note that indentation for any nesting in
-        -- builder1 and builder2 will be handled internally.
-        (Newline, Indent, _) -> \sgr n c -> build1 sgr n c `mappend`
-                                            makespaces n `mappend`
-                                            build2 sgr n n
-        -- We end with something other than a newline, meaning we need
-        -- to calculate the column for the second builder.
-        --
-        -- For a fixed width, we set the column to the offset
-        (_, _, Fixed { fixedOffset = off }) ->
-          \sgr n c -> build1 sgr n c `mappend` build2 sgr n (n + off)
-        -- For a relative offset, we add the offset to the previous column.
-        (_, _, Relative { relOffset = off }) ->
-          \sgr n c -> build1 sgr n c `mappend` build2 sgr n (c + off)
-        -- For a maximum offset, we take the max.
-        (_, _, Maximum { maxFixed = fixed, maxRelative = rel }) ->
-          \sgr n c -> build1 sgr n c `mappend`
-                      build2 sgr n (max fixed (c + rel))
-
-      -- The new begin and end states are from the monoid operations.
-      newend = end1 `mappend` end2
-      newbegin = begin1 `mappend` begin2
-
-      -- Calculate the width of the middle line by adding the second
-      -- start width onto the first ending width.
-      midline = case (ewidth1, min2) of
-        (Fixed { fixedOffset = off }, 0) ->
-          Fixed { fixedOffset = off + swidth2 }
-        (Fixed {}, mwidth) -> Fixed { fixedOffset = mwidth }
-        (Relative { relOffset = off }, 0) ->
-          Relative { relOffset = off + swidth2 }
-        (Relative { relOffset = off }, mwidth) ->
-          maximum mwidth (off + swidth2)
-        (Maximum { maxFixed = fixed, maxRelative = rel }, mwidth) ->
-          maximum (max mwidth (fixed + swidth2)) (rel + swidth2)
-
-      (newswidth, newmin) =
-        if lines1 == 0
-          then (swidth1 + swidth2, max min1 min2)
-          else (swidth1, min1)
-
-      newewidth = advanceWidth ewidth1 ewidth2
-      newwidth2 = advanceWidth ewidth1 width2
-
-      -- The new width is the maximum of the two max width, the second
-      -- end width, and the width of the newly-formed middle line.
-      newwidth = maxWidth (maxWidth newewidth midline)
-                          (maxWidth width1 newwidth2)
-
-      out = Render { renderBuilder = newbuild, renderEnding = newend,
-                     renderBegin = newbegin, renderLines = lines1 + lines2,
-                     renderStartWidth = newswidth, renderWidth = newwidth,
-                     renderEndWidth = newewidth, renderNesting = nest1,
-                     renderMin = newmin }
-    in
-      debug ("    " ++ show out ++ "\n\n") out
-
--- | The first width cannot possibly be greater than the second.
-subsumesWidth :: Width -> Width -> Bool
--- Simple comparisons: if the upper bound is greater, the lines are
--- less, and the column is less, then the render is always better.
-subsumesWidth Fixed { fixedOffset = col1 } Fixed { fixedOffset = col2 } =
-  col1 <= col2
-subsumesWidth Relative { relOffset = col1 } Relative { relOffset = col2 } =
-  col1 <= col2
--- A fixed column offset can be subsumed by a relative offset
-subsumesWidth Fixed { fixedOffset = col1 } Relative { relOffset = col2 } =
-  col1 <= col2
--- For minimum and maximum cases, we use the three above rules to
--- reason through them.
---
--- A relative can subsume a maximum by the 2nd and 3rd rules.
-subsumesWidth Maximum { maxFixed = fixed1, maxRelative = rel1 }
-              Relative { relOffset = col2 } =
-  fixed1 <= col2 && rel1 <= col2
--- A maximum can subsume a fixed by the 1st or the 3rd rule.
-subsumesWidth Fixed { fixedOffset = col1 } Maximum { maxRelative = rel2,
-                                                     maxFixed = fixed2 } =
-  col1 <= rel2 || col1 <= fixed2
--- A maximum can subsume a relative by the 2nd rule.
-subsumesWidth Relative { relOffset = col1 } Maximum { maxRelative = rel2 } =
-  col1 <= rel2
--- For two maximums, apply all three rules
-subsumesWidth Maximum { maxRelative = rel1, maxFixed = fixed1 }
-              Maximum { maxRelative = rel2, maxFixed = fixed2 } =
-  rel1 <= rel2 && fixed1 <= fixed2 && fixed1 <= rel2
-subsumesWidth _ _ = False
 
 -- | Determine whether the first 'Render' is strictly better than the second.
 subsumes :: Render -> Render -> Bool
 -- Simple comparisons: if the width is subsumed and the lines are less
-subsumes Render { renderWidth = width1, renderStartWidth = swidth1,
-                  renderLines = lines1, renderEndWidth = ewidth1,
-                  renderMin = min1 }
-         Render { renderWidth = width2, renderStartWidth = swidth2,
-                  renderLines = lines2, renderEndWidth = ewidth2,
-                  renderMin = min2 } =
-  lines1 <= lines2 && swidth1 <= swidth2 && min1 <= min2 &&
-  subsumesWidth width1 width2 && subsumesWidth ewidth1 ewidth2
+subsumes Render { renderWidth = width1, renderLines = lines1,
+                  renderEndWidth = ewidth1 }
+         Render { renderWidth = width2, renderLines = lines2,
+                  renderEndWidth = ewidth2 }=
+  lines1 <= lines2 && width1 <= width2 && ewidth1 <= ewidth2
 
 newtype Frontier = Frontier { frontierRenders :: [Render] }
+  deriving Show
+
+instance Monoid Frontier where
+  mempty = Frontier { frontierRenders = [] }
+
+  mappend front1 @ Frontier { frontierRenders = renders1 }
+          front2 @ Frontier { frontierRenders = renders2 } =
+    if length renders1 < length renders2
+      then foldl insertRender front2 renders1
+      else foldl insertRender front1 renders2
+
+mapFrontier :: (Render -> Render) -> Frontier -> Frontier
+mapFrontier func f @ Frontier { frontierRenders = renders } =
+  f { frontierRenders = map func renders }
 
 -- Add a 'Render' into a result set, ensuring that any subsumed
 -- renders are dropped.
@@ -1475,15 +1252,6 @@ insertRender Frontier { frontierRenders = renders } ins
     -- Otherwise, add the element to the list, and drop everything it subsumes.
   | otherwise =
     Frontier { frontierRenders = ins : filter (not . subsumes ins) renders }
-
-instance Monoid Frontier where
-  mempty = Frontier { frontierRenders = [] }
-
-  mappend front1 @ Frontier { frontierRenders = renders1 }
-          front2 @ Frontier { frontierRenders = renders2 } =
-    if length renders1 < length renders2
-      then foldl insertRender front2 renders1
-      else foldl insertRender front1 renders2
 
 -- | A result.  This is split into 'Single' and 'Multi' in order to
 -- optimize for the common case of a single possible rendering.
@@ -1503,54 +1271,13 @@ data Result =
       -- indexed by the ending column.
       multiOptions :: !Frontier
     }
+    deriving Show
 
-instance Monoid Result where
-  mempty = Single { singleRender = mempty }
-
-  -- If both are single, just concatenate them.
-  mappend Single { singleRender = render1 } Single { singleRender = render2 } =
-    Single { singleRender = render1 `mappend` render2 }
-  -- If the first is single and the second is multi, we have to fold
-  -- over all the options and glue on the first render.
-  mappend Single { singleRender = render1 }
-          Multi { multiOptions = Frontier { frontierRenders = opts } } =
-    let
-      -- Glue the first render on to an option.
-      foldfun :: Frontier -> Render -> Frontier
-      foldfun accum = insertRender accum . mappend render1
-    in
-      -- Fold it up, then use packResult.
-      packResult (foldl foldfun mempty opts)
-  -- If the first render is a multi, then we'll need to
-  -- glue the second render on to each option.
-  mappend Multi { multiOptions = Frontier { frontierRenders = opts } }
-          Single { singleRender = render2 } =
-    let
-      -- Glue the first render on to an option.
-      foldfun :: Frontier -> Render -> Frontier
-      foldfun accum render1 = insertRender accum (render1 `mappend` render2)
-    in
-      -- Fold it up, then use packResult.
-      packResult (foldl foldfun mempty opts)
-  -- If both are multis, then we need a two-level fold
-  mappend Multi { multiOptions = Frontier { frontierRenders = opts1 } }
-          Multi { multiOptions = Frontier { frontierRenders = opts2 } } =
-    let
-      -- Outer fold, over each option in the accumulated result,
-      -- gluing on the next render.
-      outerfold :: Frontier -> Render -> Frontier
-      outerfold accum render1 =
-        let
-          -- Innermost fold, glues two options together
-          innerfold :: Frontier -> Render -> Frontier
-          innerfold accum' = insertRender accum' . mappend render1
-        in
-          -- Don't bother calling packResult here, we'll do
-          -- it at the end anyway.
-          foldl innerfold accum opts2
-    in
-      -- Fold it up, then use packResult.
-      packResult (foldl outerfold mempty opts1)
+mapResult :: (Render -> Render) -> Result -> Result
+mapResult func Single { singleRender = render } =
+  Single { singleRender = func render }
+mapResult func Multi { multiOptions = opts } =
+  Multi { multiOptions = mapFrontier func opts }
 
 -- | Generate n spaces
 makespaces :: Int -> Builder
@@ -1581,25 +1308,211 @@ mergeResults Single { singleRender = render }
 mergeResults m @ Multi {} s @ Single {} = mergeResults s m
 -- Otherwise it's a straightaway HashMap union
 mergeResults Multi { multiOptions = opts1 } Multi { multiOptions = opts2 } =
-  packResult (opts1 `mappend` opts2)
+  packResult (opts1 <> opts2)
 
 -- | Produce a 'Builder' that renders the 'Doc' using the optimal
 -- layout engine.
 
--- Basic algorithm overview: each Doc is rendering into a Result,
--- which has an upper-bound (the last column at which we can start
--- without causing an overrun), an ending column (which may be a
--- relative or fixed position), and the actual render, which has a
--- "badness".  A negative upper-bound value indicates overrun.
---
--- We keep only ONE result for each upper-bound, start column pair
--- (ie. the best one).  This forms the "frontier" for the dynamic
--- programming algorithm.
---
--- Note that due to the complexity of the combinators, we CAN see
--- cubic time/space complexity.  However, actual running times are
--- much lower, especially for Docs that contain many hard linebreaks
--- and few Options.
+appendContent :: Int -> Builder -> Render -> Render
+appendContent len content r @ Render { renderEnding = Indent,
+                                       renderNesting = lvl,
+                                       renderBuilder = builder,
+                                       renderEndWidth = ewidth } =
+  let
+    ind = max 0 (lvl - ewidth)
+  in
+    r { renderBuilder = builder <> makespaces ind <> content,
+        renderEnding = None, renderEndWidth = ewidth + ind + len }
+appendContent len content r @ Render { renderBuilder = builder,
+                                       renderEndWidth = ewidth } =
+  r { renderBuilder = builder <> content,
+      renderEnding = None, renderEndWidth = ewidth + len }
+
+appendLine :: Render -> Render
+appendLine r @ Render { renderBuilder = builder, renderLines = l,
+                        renderWidth = width, renderEndWidth = ewidth } =
+  r { renderBuilder = builder <> fromChar '\n', renderWidth = max width ewidth,
+      renderLines = l + 1, renderEnding = Indent, renderEndWidth = 0 }
+
+-- | Core algorithm.  Walks forward in the Doc, maintaining a dynamic
+-- programming frontier consisting of all renders that aren't subsumed
+-- by other renders (possibly with a limit on the size)
+buildDynamic :: Maybe Int
+             -- ^ The maximum frontier size
+             -> Int
+             -- ^ The maximum number of columns.
+             -> Bool
+             -- ^ Whether or not to render with ANSI terminal options.
+             -> Doc
+             -- ^ The document to render.
+             -> Builder
+buildDynamic fsize maxcol ansiterm doc =
+  let
+    build :: Graphics -> Result -> [Doc] -> Result
+    build _ accum [] = mapResult (\r @ Render { renderFinish = f } -> f r) accum
+    build _ accum d
+      | debug ("build\n  " ++ show accum ++ "\n  " ++ show d ++ " =") False =
+        undefined
+    -- For content, append to the accumulated values and continue.
+    build sgr accum (Char { charContent = chr } : rest) =
+      let
+        withcontent = mapResult (appendContent 1 (fromChar chr)) accum
+      in
+        build sgr withcontent rest
+    build sgr accum (Content { contentString = txt,
+                               contentLength = len } : rest) =
+      let
+        withcontent =
+          mapResult (appendContent len (fromLazyByteString txt)) accum
+      in
+        build sgr withcontent rest
+    build sgr accum (Line {} : rest) =
+      let
+        withcontent = mapResult appendLine accum
+      in
+        build sgr withcontent rest
+    -- Build the inner docs, then continue
+    build sgr accum (Cat { catDocs = docs } : rest) =
+      build sgr accum (docs ++ rest)
+    -- Non-aligning, delayed indent
+    build sgr accum (Nest { nestDelay = True, nestAlign = False,
+                            nestDoc = inner, nestLevel = off } : rest) =
+      let
+        setNesting r @ Render { renderFinish = oldfinish,
+                                renderNesting = lvl  } =
+          let
+            finish r' = r' { renderNesting = lvl, renderFinish = oldfinish }
+          in
+            r { renderNesting = lvl + off, renderFinish = finish }
+      in
+        build sgr (build sgr (mapResult setNesting accum) [inner]) rest
+    -- Non-aligning, immediate indent
+    build sgr accum (Nest { nestDelay = False, nestAlign = False,
+                            nestDoc = inner, nestLevel = off } : rest) =
+      let
+        setNesting r @ Render { renderFinish = oldfinish,
+                                renderNesting = lvl  } =
+          let
+            finish r' = r' { renderNesting = lvl, renderFinish = oldfinish }
+          in
+            r { renderNesting = lvl + off, renderFinish = finish,
+                renderEnding = Indent }
+      in
+        build sgr (build sgr (mapResult setNesting accum) [inner]) rest
+    -- Aligning, delayed indent
+    build sgr accum (Nest { nestDelay = True, nestAlign = True,
+                            nestDoc = inner, nestLevel = off } : rest) =
+      let
+        setNesting r @ Render { renderFinish = oldfinish, renderNesting = lvl,
+                                renderEndWidth = ewidth } =
+          let
+            finish r' = r' { renderNesting = lvl, renderFinish = oldfinish }
+          in
+            r { renderNesting = ewidth + off, renderFinish = finish }
+      in
+        build sgr (build sgr (mapResult setNesting accum) [inner]) rest
+    -- Aligning, immediate indent
+    build sgr accum (Nest { nestDelay = False, nestAlign = True,
+                            nestDoc = inner, nestLevel = off } : rest) =
+      let
+        setNesting r @ Render { renderFinish = oldfinish, renderNesting = lvl,
+                                renderEndWidth = ewidth } =
+          let
+            finish r' = r' { renderNesting = lvl, renderFinish = oldfinish }
+          in
+            r { renderNesting = ewidth + off, renderFinish = finish,
+                renderEnding = Indent }
+      in
+        build sgr (build sgr (mapResult setNesting accum) [inner]) rest
+    -- For choose, render each choice, then fold all the choices
+    -- together and combine them into a single frontier.
+    build sgr accum (Choose { chooseOptions = options } : rest) =
+      let
+        setRestore r @ Render { renderFinish = oldfinish } =
+          let
+            finish r' = r' { renderFinish = oldfinish }
+          in
+            r { renderFinish = finish }
+
+        withrestore = mapResult setRestore accum
+
+        -- Build up all the components
+        results = map (build sgr withrestore . (: [])) options
+        -- Now merge them into an minimal set of options
+        merged = foldl1 mergeResults results
+        -- Reduce the results by some amount
+        reduced = case fsize of
+          Just fsize' -> reduce fsize' merged
+          Nothing -> merged
+      in
+        build sgr reduced rest
+    -- For graphics, generate the control sequences before and after
+    -- the inner document.
+    build sgr1 accum (Graphics { graphicsDoc = inner,
+                                 graphicsSGR = sgr2 } : rest)
+      -- Only do graphics if the ansiterm flag is set.
+      | ansiterm =
+        let
+          appendControl :: Render -> Render
+          appendControl r @ Render { renderBuilder = builder,
+                                     renderFinish = oldfinish } =
+            let
+              finish r' @ Render { renderBuilder = builder' } =
+                r' { renderBuilder = builder' <> switchGraphics sgr2 sgr1,
+                    renderFinish = oldfinish }
+            in
+              r { renderBuilder = builder <> switchGraphics sgr1 sgr2,
+                  renderFinish = finish }
+        in
+          build sgr1 (build sgr2 (mapResult appendControl accum) [inner]) rest
+      -- Otherwise, skip it entirely
+      | otherwise = build sgr1 accum (inner : rest)
+
+    -- | Calculate the overrun of a width.
+    overrun :: Int -> Int
+    overrun col = max 0 (col - maxcol)
+
+    -- | Compare two Renders.  Less than means better.
+    compareRenders Render { renderLines = lines1, renderWidth = width1,
+                            renderEndWidth = ewidth1 }
+                   Render { renderLines = lines2, renderWidth = width2,
+                            renderEndWidth = ewidth2  } =
+      let
+        width1' = max width1 ewidth1
+        width2' = max width2 ewidth2
+      in case compare (overrun width1') (overrun width2') of
+         EQ -> compare lines1 lines2
+         out -> out
+
+    -- Pick the best result out of a set of results.  Used at the end to
+    -- pick the final result.
+    bestRenderInOpts :: [Render] -> Render
+    bestRenderInOpts = minimumBy compareRenders
+
+    reduce :: Int -> Result -> Result
+    reduce _ s @ Single {} = s
+    reduce size Multi { multiOptions = Frontier { frontierRenders = opts } } =
+      let
+        sorted = sortBy compareRenders opts
+      in
+        Multi { multiOptions = Frontier { frontierRenders = take size sorted } }
+
+    start = Render { renderWidth = 0, renderEnding = Indent, renderLines = 0,
+                     renderBuilder = mempty, renderFinish = id,
+                     renderEndWidth = 0, renderNesting = 0 }
+
+    -- Call build, get the result, then pick the best one.
+    Render { renderBuilder = result } =
+      case build Default Single { singleRender = start } [doc] of
+        Single { singleRender = render } -> render
+        Multi { multiOptions = Frontier { frontierRenders = opts } } ->
+          bestRenderInOpts opts
+  in
+    result
+
+-- | Render a 'Doc' as a 'Builder' using an optimal layout rendering
+-- engine.  The engine will render the document in the fewest number
+-- of lines possible without exceeding the maximum column width.
 buildOptimal :: Int
              -- ^ The maximum number of columns.
              -> Bool
@@ -1607,208 +1520,7 @@ buildOptimal :: Int
              -> Doc
              -- ^ The document to render.
              -> Builder
-buildOptimal maxcol ansiterm doc =
-  let
-    build :: Doc -> Result
-    build d
-      | debug ("build\n  " ++ show d ++ " =") False = undefined
-    -- For char, bytestring, and lazy bytestring,
-    build Char { charContent = chr } =
-      let
-        builder = const $! const $! const $! fromChar chr
-      in
-        -- Single characters have a single possibility, a relative
-        -- ending position one beyond the start, and an upper-bound
-        -- one shorter than the maximum width.
-        Single { singleRender =
-                    Render { renderEnding = Normal, renderBuilder = builder,
-                             renderLines = 0, renderStartWidth = 1,
-                             renderWidth = Relative 1, renderNesting = 0,
-                             renderEndWidth = Relative 1, renderMin = 0,
-                             renderBegin = Indent } }
-    build Content { contentString = txt, contentLength = len } =
-      let
-        builder = const $! const $! const $! fromLazyByteString txt
-      in
-        -- Text has a single possibility and a relative ending position
-        -- equal to its length
-       Single { singleRender =
-                    Render { renderEnding = Normal, renderBuilder = builder,
-                             renderStartWidth = len, renderNesting = 0,
-                             renderWidth = Relative len, renderBegin = Indent,
-                             renderLines = 0, renderMin = 0,
-                             renderEndWidth = Relative len } }
-    build Line {} =
-      let
-        builder = const $! const $! const $! fromChar '\n'
-      in
-        -- A newline starts at the nesting level, has no overrun, and an
-        -- upper-bound equal to the maximum column width.
-        --
-        -- Note: the upper bound is adjusted elsewhere.
-        Single { singleRender =
-                    Render { renderLines = 1, renderNesting = 0,
-                             renderEnding = Newline, renderBegin = None,
-                             renderBuilder = builder, renderStartWidth = 0,
-                             renderMin = 0, renderWidth = Fixed 0,
-                             renderEndWidth = Fixed 0 } }
-    -- This is for an empty cat, ie. the empty document
-    build Cat { catDocs = [] } = mempty
-    build Cat { catDocs = first : rest } =
-      let
-        -- Glue two Results together.  This gets used in a fold.
-        appendResults :: Result -> Doc -> Result
-        -- The accumulated result is a Single.
-        appendResults res1 = mappend res1 . build
-
-        -- Build the first item
-        firstres = build first
-      in
-        -- Fold them all together with appendResults
-        foldl appendResults firstres rest
-    build Nest { nestDelay = delay, nestDoc = inner,
-                 nestAlign = alignnest, nestLevel = lvl } =
-      let
-        nestWidth :: Width -> Width
-        -- For a fixed width, we add the nesting to the fixed width,
-        -- converting to a relative width if we're aligning.
-        nestWidth Fixed { fixedOffset = n } =
-          if alignnest
-            -- If we're aligning, convert the width to relative.
-            then Relative { relOffset = n + lvl }
-            -- Otherwise just add on to the fixed width.
-            else Fixed { fixedOffset = n + lvl }
-        -- Leave relative widths alone; they'll get incremented when
-        -- we add on the first line.
-        nestWidth r @ Relative {} = r
-        -- For maximum widths, apply the same transform as for fixed
-        -- to the fixed portion.
-        nestWidth Maximum { maxFixed = n, maxRelative = rel } =
-          if alignnest
-            -- If we're aligning, convert the width to relative, take
-            -- the maximum of the two widths.
-            then Relative { relOffset = max (n + lvl) rel }
-            -- Otherwise just add on to the fixed width.
-            else maximum (n + lvl) (rel + lvl)
-
-        updateRender :: Render -> Render
-        updateRender r @ Render { renderBuilder = builder,
-                                  renderStartWidth = swidth,
-                                  renderMin = minwidth,
-                                  renderWidth = width,
-                                  renderNesting = nesting,
-                                  renderEndWidth = ewidth,
-                                  renderBegin = begin } =
-          let
-            -- We add indentation if the rendering definitely needs it
-            -- AND we're not delaying.  If we're delaying, then the
-            -- indentation will be added at the next newline.
-            addspaces = begin == Indent && not delay
-            -- Wrap up the render functions in code that alters the
-            -- nesting and column numbers.
-            (newbuilder, newswidth, newnesting, newmin) =
-              case (alignnest, addspaces) of
-              -- We're aligning, and we need to add spaces.  Set the
-              -- column and the nesting to the old column plus the
-              -- offset.
-              (True, True) ->
-                let
-                  nspaces = max 0 lvl
-                in
-                  (\sgr _ c -> makespaces nspaces `mappend`
-                               builder sgr (c + nspaces) (c + nspaces),
-                   swidth + nspaces, 0, minwidth - nspaces)
-              -- We're aligning, but don't need spaces.  Leave the
-              -- column as is, and don't generate any spaces.
-              (True, False) -> (\sgr _ c -> builder sgr (c + lvl) c,
-                                swidth, 0, minwidth)
-              -- We're incrementing nesting and generating spaces.
-              -- Generate a number of spaces equal to the max of zero
-              -- or the difference.  Set the column to the greater of
-              -- the current column or the nesting.
-              (False, True) ->
-                (\sgr n c ->
-                  if c < lvl
-                    then makespaces (lvl - c) `mappend`
-                         builder sgr (n + lvl) lvl
-                    else builder sgr (n + lvl) c,
-                 swidth, nesting, lvl + swidth)
-              -- We're incrementing nesting, but not generating
-              -- spaces.  Leave the column as-is.
-              (False, False) -> (\sgr n c -> builder sgr (n + lvl) c,
-                                 swidth, nesting + lvl, minwidth)
-          in
-            r { renderBuilder = newbuilder, renderNesting = newnesting,
-                renderStartWidth = newswidth, renderWidth = nestWidth width,
-                renderEndWidth = nestWidth ewidth, renderMin = newmin }
-
-        res = build inner
-      in case res of
-        -- Update the render for a Single.
-        s @ Single { singleRender = r } -> s { singleRender = updateRender r }
-        -- Update all renders for a Multi.
-        m @ Multi { multiOptions = Frontier { frontierRenders = opts } } ->
-          let
-            updated = map updateRender opts
-          in
-            m { multiOptions = Frontier { frontierRenders = updated } }
-    build Choose { chooseOptions = options } =
-      let
-        -- Build up all the components
-        results = map build options
-      in
-        -- Now merge them into an minimal set of options
-        foldl1 mergeResults results
-    build Graphics { graphicsSGR = sgr2, graphicsDoc = inner }
-      -- Only do graphics if the ansiterm flag is set.
-      | ansiterm =
-        let
-          -- Insert graphics control characters without updating
-          -- column numbers, as they aren't visible.
-          wrapBuilder r @ Render { renderBuilder = builder } =
-            r { renderBuilder = \sgr1 n c -> switchGraphics sgr1 sgr2 `mappend`
-                                             builder sgr2 n c `mappend`
-                                             switchGraphics sgr2 sgr1 }
-        in case build inner of
-          s @ Single { singleRender = render } ->
-            s { singleRender = wrapBuilder render }
-          m @ Multi { multiOptions = Frontier { frontierRenders = opts } } ->
-            let
-              wrapped = map wrapBuilder opts
-            in
-              m { multiOptions = Frontier { frontierRenders = wrapped } }
-      -- Otherwise, skip it entirely
-      | otherwise = build inner
-
-    -- Pick the best result out of a set of results.  Used at the end to
-    -- pick the final result.
-    bestRenderInOpts :: [Render] -> Render
-    bestRenderInOpts =
-      let
-        -- | Calculate the overrun of a width.
-        overrun :: Width -> Int
-        overrun Fixed { fixedOffset = n } = max 0 (n - maxcol)
-        overrun Relative { relOffset = n } = max 0 (n - maxcol)
-        overrun Maximum { maxFixed = fixed, maxRelative = rel } =
-          max 0 (max fixed rel - maxcol)
-
-        -- | Compare two Renders.  Less than means better.
-        compareRenders Render { renderLines = lines1, renderWidth = width1 }
-                       Render { renderLines = lines2, renderWidth = width2 } =
-          case compare (overrun width1) (overrun width2) of
-            EQ -> compare lines1 lines2
-            out -> out
-      in
-        minimumBy compareRenders
-
-    -- Call build, get the result, then pick the best one.
-    Render { renderBuilder = result } =
-      case build doc of
-        Single { singleRender = render } -> render
-        Multi { multiOptions = Frontier { frontierRenders = opts } } ->
-          bestRenderInOpts opts
-  in
-    result Default 0 0
+buildOptimal = buildDynamic Nothing
 
 -- | Render a 'Doc' as a lazy bytestring using an optimal layout
 -- rendering engine.  The engine will render the document in the
@@ -1836,6 +1548,55 @@ putOptimal :: Handle
            -> IO ()
 putOptimal handle cols color =
   toByteStringIO (Strict.hPut handle) . buildOptimal cols color
+
+-- | Render a 'Doc' as a 'Builder' using an optimal layout engine with
+-- a constrained frontier size.  Larger frontier sizes will result in
+-- a better rendering, at the cost of more execution time.  As the
+-- frontier size increases, this algorithm's behavior will converge
+-- towards 'renderOptimal'.
+buildGreedy :: Word
+            -- ^ The maximum frontier size
+            -> Int
+            -- ^ The maximum number of columns.
+            -> Bool
+            -- ^ Whether or not to render with ANSI terminal options.
+            -> Doc
+            -- ^ The document to render.
+            -> Builder
+buildGreedy 0 = error "Frontier size cannot be zero"
+buildGreedy fsize = buildDynamic $! Just $! fromIntegral fsize
+
+-- | Render a 'Doc' as a lazy bytestring using an optimal layout engine with
+-- a constrained frontier size.  Larger frontier sizes will result in
+-- a better rendering, at the cost of more execution time.  As the
+-- frontier size increases, this algorithm's behavior will converge
+-- towards 'renderOptimal'.
+renderGreedy :: Word
+            -- ^ The maximum frontier size
+            -> Int
+            -- ^ The maximum number of columns.
+            -> Bool
+            -- ^ Whether or not to render with ANSI terminal options.
+            -> Doc
+            -- ^ The document to render.
+            -> Lazy.ByteString
+renderGreedy fsize cols color = toLazyByteString . buildGreedy fsize cols color
+
+-- | Output the entire 'Doc', as rendered by 'renderOptimal' to the
+-- given 'Handle'.
+putGreedy :: Handle
+          -- ^ The 'Handle' to which to write output
+          -> Word
+          -- ^ The maximum frontier size
+          -> Int
+          -- ^ The maximum number of columns.
+          -> Bool
+          -- ^ Whether or not to render with ANSI terminal options.
+          -> Doc
+          -- ^ The document to render.
+          -> IO ()
+putGreedy handle fsize cols color =
+  toByteStringIO (Strict.hPut handle) . buildGreedy fsize cols color
 
 -- | A class representing datatypes that can be formatted as 'Doc's.
 class Format item where

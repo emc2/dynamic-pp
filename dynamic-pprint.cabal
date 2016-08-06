@@ -1,6 +1,6 @@
-Name:                   dynamic-pp
+Name:                   dynamic-pprint
 Category:               Text
-Version:                0.5.0
+Version:                0.1.0
 License:                BSD3
 License-File:           LICENSE
 Author:                 Eric McCorkle

@@ -41,23 +41,23 @@ renderOptimalTests :: [Test]
 renderOptimalTests =
   let
     innerstructdoc = string "inner(" <> align (string "123" </>
-                                                string "456") <//>
-                                         rparen
+                                               string "456" <//>
+                                               rparen)
     structdoc = string "pre (" <> align (string "hello" </>
                                          string "world" <!>
                                          string "aaaa" </>
-                                         string "bbb") <//>
-                                  rparen
+                                         string "bbb" <//>
+                                         rparen)
     nesteddoc = string "pre (" <> align (innerstructdoc </>
                                          string "hello" <!>
                                          string "aaaa" </>
-                                         string "bbb") <//>
-                                  rparen
+                                         string "bbb" <//>
+                                         rparen)
     nesteddoc2 = string "pre (" <> align (string "hello" </>
                                           innerstructdoc <!>
                                           string "aaaa" </>
-                                          string "bbb") <//>
-                                   rparen
+                                          string "bbb" <//>
+                                          rparen)
   in [
     "empty" ~: Lazy.empty @=? renderOptimal 1 False empty,
     "char" ~: Lazy.singleton 'a' @=? renderOptimal 1 False (char 'a'),

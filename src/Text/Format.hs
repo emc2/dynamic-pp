@@ -81,6 +81,7 @@ module Text.Format(
        semi,
        colon,
        dot,
+       bar,
        backslash,
        equals,
        space,
@@ -598,6 +599,10 @@ colon = char ':'
 -- | The character @.@
 dot :: Doc
 dot = char '.'
+
+-- | The character @|@
+bar :: Doc
+bar = char '|'
 
 -- | The character @\@
 backslash :: Doc

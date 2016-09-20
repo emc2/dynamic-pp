@@ -163,6 +163,7 @@ module Text.Format(
        fillCat,
        enclose,
        punctuate,
+       punctuatePrefix,
        encloseSep,
 
        -- ** Transforming @Doc@s
@@ -217,8 +218,7 @@ debug :: String -> a -> a
 --debug = trace
 debug _ = id
 
--- | Datatype representing a formatted document.
-
+-- | Enumeration indicating how to treat a linebreak.
 data LineKind =
     -- | Unerasable linebreak
     Hard
@@ -232,6 +232,8 @@ data LineKind =
 -- formatting of the generated text.  These are rendered by the
 -- various rendering engines into a Builder (from the blaze-builder
 -- library).
+
+-- | Datatype representing a formatted document.
 data Doc =
     -- | A single character.  Cannot be a newline.
     Char { charContent :: !Char }
@@ -419,7 +421,11 @@ instance Hashable Graphics where
   hashWithSalt s Default = s `hashWithSalt` (1 :: Int)
 
 -- | Generate a 'Doc' representing a graphics mode switch.
-switchGraphics :: Graphics -> Graphics -> Builder
+switchGraphics :: Graphics
+               -- ^ Beginning mode.
+               -> Graphics
+               -- ^ Ending mode.
+               -> Builder
 switchGraphics _ Default = fromString (setSGRCode [Reset])
 switchGraphics Default Options { consoleIntensity = consIntensity,
                                  swapForegroundBackground = swap,
@@ -643,7 +649,6 @@ alignOffset :: Int
             -> Doc
 alignOffset offset inner = Nest { nestDelay = True, nestAlign = True,
                                   nestLevel = offset, nestDoc = inner }
-
 
 -- | Enclose a 'Doc' in single quotes
 squoted :: Doc -> Doc
@@ -1087,10 +1092,19 @@ enclose left right middle = hcat [left, middle, right]
 
 -- | Concatenate a list of 'Doc's into a single doc, with each element
 -- separated from the others by a given 'Doc' representing
--- punctuation.
+-- punctuation.  The punctuation is appended to all elements but the
+-- last.
 punctuate :: Doc -> [Doc] -> [Doc]
 punctuate punc (first : rest @ (_ : _)) = first <> punc : punctuate punc rest
 punctuate _ doc = doc
+
+-- | Concatenate a list of 'Doc's into a single doc, with each element
+-- separated from the others by a given 'Doc' representing
+-- punctuation.  The punctuation is prepended to elements but the
+-- first.
+punctuatePrefix :: Doc -> [Doc] -> [Doc]
+punctuatePrefix punc (first : rest) = first : map (punc <>) rest
+punctuatePrefix _ doc = doc
 
 -- | Enclose a list of 'Doc's, separated by punctuation, and align
 -- nesting of the contents to the end of the left enclosing 'Doc'
@@ -1354,33 +1368,34 @@ buildDynamic :: Maybe Int
 buildDynamic fsize maxcol ansiterm doc =
   let
     build :: Graphics -> Result -> [Doc] -> Result
-    build _ accum [] = mapResult (\r @ Render { renderFinish = f } -> f r) accum
-    build _ accum d
-      | debug ("build\n  " ++ show accum ++ "\n  " ++ show d ++ " =") False =
+    build _ frontier [] =
+      mapResult (\r @ Render { renderFinish = f } -> f r) frontier
+    build _ frontier d
+      | debug ("build\n  " ++ show frontier ++ "\n  " ++ show d ++ " =") False =
         undefined
     -- For content, append to the accumulated values and continue.
-    build sgr accum (Char { charContent = chr } : rest) =
+    build sgr frontier (Char { charContent = chr } : rest) =
       let
-        withcontent = mapResult (appendContent 1 (fromChar chr)) accum
+        withcontent = mapResult (appendContent 1 (fromChar chr)) frontier
       in
         build sgr withcontent rest
-    build sgr accum (Content { contentString = txt,
+    build sgr frontier (Content { contentString = txt,
                                contentLength = len } : rest) =
       let
         withcontent =
-          mapResult (appendContent len (fromLazyByteString txt)) accum
+          mapResult (appendContent len (fromLazyByteString txt)) frontier
       in
         build sgr withcontent rest
-    build sgr accum (Line {} : rest) =
+    build sgr frontier (Line {} : rest) =
       let
-        withcontent = mapResult appendLine accum
+        withcontent = mapResult appendLine frontier
       in
         build sgr withcontent rest
     -- Build the inner docs, then continue
-    build sgr accum (Cat { catDocs = docs } : rest) =
-      build sgr accum (docs ++ rest)
+    build sgr frontier (Cat { catDocs = docs } : rest) =
+      build sgr frontier (docs ++ rest)
     -- Non-aligning, delayed indent
-    build sgr accum (Nest { nestDelay = True, nestAlign = False,
+    build sgr frontier (Nest { nestDelay = True, nestAlign = False,
                             nestDoc = inner, nestLevel = off } : rest) =
       let
         setNesting r @ Render { renderFinish = oldfinish,
@@ -1390,9 +1405,9 @@ buildDynamic fsize maxcol ansiterm doc =
           in
             r { renderNesting = lvl + off, renderFinish = finish }
       in
-        build sgr (build sgr (mapResult setNesting accum) [inner]) rest
+        build sgr (build sgr (mapResult setNesting frontier) [inner]) rest
     -- Non-aligning, immediate indent
-    build sgr accum (Nest { nestDelay = False, nestAlign = False,
+    build sgr frontier (Nest { nestDelay = False, nestAlign = False,
                             nestDoc = inner, nestLevel = off } : rest) =
       let
         setNesting r @ Render { renderFinish = oldfinish,
@@ -1403,9 +1418,9 @@ buildDynamic fsize maxcol ansiterm doc =
             r { renderNesting = lvl + off, renderFinish = finish,
                 renderEnding = Indent }
       in
-        build sgr (build sgr (mapResult setNesting accum) [inner]) rest
+        build sgr (build sgr (mapResult setNesting frontier) [inner]) rest
     -- Aligning, delayed indent
-    build sgr accum (Nest { nestDelay = True, nestAlign = True,
+    build sgr frontier (Nest { nestDelay = True, nestAlign = True,
                             nestDoc = inner, nestLevel = off } : rest) =
       let
         setNesting r @ Render { renderFinish = oldfinish, renderNesting = lvl,
@@ -1415,9 +1430,9 @@ buildDynamic fsize maxcol ansiterm doc =
           in
             r { renderNesting = ewidth + off, renderFinish = finish }
       in
-        build sgr (build sgr (mapResult setNesting accum) [inner]) rest
+        build sgr (build sgr (mapResult setNesting frontier) [inner]) rest
     -- Aligning, immediate indent
-    build sgr accum (Nest { nestDelay = False, nestAlign = True,
+    build sgr frontier (Nest { nestDelay = False, nestAlign = True,
                             nestDoc = inner, nestLevel = off } : rest) =
       let
         setNesting r @ Render { renderFinish = oldfinish, renderNesting = lvl,
@@ -1428,10 +1443,10 @@ buildDynamic fsize maxcol ansiterm doc =
             r { renderNesting = ewidth + off, renderFinish = finish,
                 renderEnding = Indent }
       in
-        build sgr (build sgr (mapResult setNesting accum) [inner]) rest
+        build sgr (build sgr (mapResult setNesting frontier) [inner]) rest
     -- For choose, render each choice, then fold all the choices
     -- together and combine them into a single frontier.
-    build sgr accum (Choose { chooseOptions = options } : rest) =
+    build sgr frontier (Choose { chooseOptions = options } : rest) =
       let
         setRestore r @ Render { renderFinish = oldfinish } =
           let
@@ -1439,7 +1454,7 @@ buildDynamic fsize maxcol ansiterm doc =
           in
             r { renderFinish = finish }
 
-        withrestore = mapResult setRestore accum
+        withrestore = mapResult setRestore frontier
 
         -- Build up all the components
         results = map (build sgr withrestore . (: [])) options
@@ -1453,7 +1468,7 @@ buildDynamic fsize maxcol ansiterm doc =
         build sgr reduced rest
     -- For graphics, generate the control sequences before and after
     -- the inner document.
-    build sgr1 accum (Graphics { graphicsDoc = inner,
+    build sgr1 frontier (Graphics { graphicsDoc = inner,
                                  graphicsSGR = sgr2 } : rest)
       -- Only do graphics if the ansiterm flag is set.
       | ansiterm =
@@ -1469,9 +1484,10 @@ buildDynamic fsize maxcol ansiterm doc =
               r { renderBuilder = builder <> switchGraphics sgr1 sgr2,
                   renderFinish = finish }
         in
-          build sgr1 (build sgr2 (mapResult appendControl accum) [inner]) rest
+          build sgr1 (build sgr2 (mapResult appendControl frontier) [inner])
+                rest
       -- Otherwise, skip it entirely
-      | otherwise = build sgr1 accum (inner : rest)
+      | otherwise = build sgr1 frontier (inner : rest)
 
     -- | Calculate the overrun of a width.
     overrun :: Int -> Int

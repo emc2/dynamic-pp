@@ -1,16 +1,13 @@
--- Copyright (c) 2014 Eric McCorkle.  All rights reserved.
+-- Copyright (c) 2017 Eric McCorkle.  All rights reserved.
 --
 -- Redistribution and use in source and binary forms, with or without
 -- modification, are permitted provided that the following conditions
 -- are met:
---
 -- 1. Redistributions of source code must retain the above copyright
 --    notice, this list of conditions and the following disclaimer.
---
 -- 2. Redistributions in binary form must reproduce the above copyright
 --    notice, this list of conditions and the following disclaimer in the
 --    documentation and/or other materials provided with the distribution.
---
 -- 3. Neither the name of the author nor the names of any contributors
 --    may be used to endorse or promote products derived from this software
 --    without specific prior written permission.
@@ -27,18 +24,42 @@
 -- OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 -- OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 -- SUCH DAMAGE.
-{-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wall -Werror -funbox-strict-fields #-}
 
-module Main(main) where
+-- | Simple fast render algorithm.  This simply takes the first option
+-- in any 'Choice'.
+module Text.Format.Algorithms.Fast(
+       renderFast,
+       buildFast,
+       putFast
+       ) where
 
-import Test.HUnitPlus
+import Blaze.ByteString.Builder
+import Blaze.ByteString.Builder.Char.Utf8
+import Text.Format.Doc
+import System.IO
 
-import qualified Tests.Text as Text
+import qualified Data.ByteString as Strict
+import qualified Data.ByteString.Lazy as Lazy
 
-tests = [ Text.tests ]
+-- | Produce a 'Builder' that renders the 'Doc' quickly.
+buildFast :: Doc -> Builder
+buildFast Char { charContent = chr } = fromChar chr
+buildFast Content { contentString = builder } = fromLazyByteString builder
+buildFast Line {} = fromChar '\n'
+buildFast Cat { catDocs = docs } = mconcat (map buildFast docs)
+buildFast Nest { nestDoc = inner } = buildFast inner
+buildFast Choose { chooseOptions = opts } = buildFast (head opts)
+buildFast Graphics { graphicsDoc = inner } = buildFast inner
 
-testsuite = TestSuite { suiteName = "UnitTests", suiteConcurrently = True,
-                        suiteTests = tests, suiteOptions = [] }
+-- | Render the entire 'Doc', preserving newlines, but without any
+-- indentation.  Good for output that will be read only by machine,
+-- but where newlines matter.
+renderFast :: Doc -> Lazy.ByteString
+renderFast = toLazyByteString . buildFast
 
-main :: IO ()
-main = createMain [testsuite]
+-- | Output the entire 'Doc', as rendered by 'renderFast' to the
+-- given 'Handle'.
+putFast :: Handle -> Doc -> IO ()
+putFast handle =
+  toByteStringIO (Strict.hPut handle) . buildFast

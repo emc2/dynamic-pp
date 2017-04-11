@@ -1283,100 +1283,72 @@ instance Monoid Begin where
   mappend Next begin = begin
   mappend begin _ = begin
 
--- | A rendering of a document.
-data Render =
-  Render {
+data Dims =
+  Dims {
     -- | Starting line fragment width.
-    renderStartWidth :: !Int,
+    dimsStartWidth :: !Int,
     -- | Number of extra spaces to generate.
-    renderNesting :: !Int,
+    dimsNesting :: !Int,
     -- | Minimum size of the first line.
-    renderMin :: !Int,
+    dimsMin :: !Int,
     -- | Width: Number of columns at the widest point in the complete
     -- lines.
-    renderWidth :: !Width,
+    dimsWidth :: !Width,
     -- | Ending line fragment width.
-    renderEndWidth :: !Width,
+    dimsEndWidth :: !Width,
     -- | The number of lines in the document.
-    renderLines :: !Word,
-    -- | A builder that constructs the document.
-    renderBuilder :: !(Graphics -> Int -> Int -> Builder),
+    dimsLines :: !Word,
     -- | Indentation mode for the next document.
-    renderEnding :: !Ending,
+    dimsEnding :: !Ending,
     -- | Whether or not the builder needs indentation inserted before.
-    renderBegin :: !Begin
+    dimsBegin :: !Begin
   }
+  deriving (Eq)
 
-instance Show Render where
-  show Render { renderWidth = mwidth, renderStartWidth = swidth,
-                renderEndWidth = ewidth, renderLines = lns,
-                renderBuilder = builder, renderEnding = end,
-                renderBegin = begin, renderNesting = nesting,
-                renderMin = minwidth } =
-    "Render { renderStartWidth = " ++ show swidth ++
-    ", renderNesting = " ++ show nesting ++
-    ", renderMin = " ++ show minwidth ++
-    ", renderWidth = " ++ show mwidth ++
-    ", renderEndWidth = " ++ show ewidth ++
-    ", renderLines = " ++ show lns ++
-    ", renderEnding = " ++ show end ++
-    ", renderBegin = " ++ show begin ++
-    ", renderBuilder = " ++ show (toLazyByteString (builder Default 0 0)) ++
+instance Show Dims where
+  show Dims { dimsWidth = mwidth, dimsStartWidth = swidth,
+              dimsNesting = nesting, dimsMin = minwidth,
+              dimsEndWidth = ewidth, dimsLines = lns,
+              dimsEnding = end, dimsBegin = begin } =
+    "Dims { dimsStartWidth = " ++ show swidth ++
+    ", dimsNesting = " ++ show nesting ++
+    ", dimsMin = " ++ show minwidth ++
+    ", dimsWidth = " ++ show mwidth ++
+    ", dimsEndWidth = " ++ show ewidth ++
+    ", dimsLines = " ++ show lns ++
+    ", dimsEnding = " ++ show end ++
+    ", dimsBegin = " ++ show begin ++
     " }"
 
-instance Monoid Render where
-  mempty = Render { renderStartWidth = 0, renderWidth = Relative 0,
-                    renderEndWidth = Relative 0, renderEnding = mempty,
-                    renderNesting = 0, renderLines = 0, renderBegin = mempty,
-                    renderBuilder = const mempty, renderMin = 0 }
+instance Monoid Dims where
+  mempty = Dims { dimsStartWidth = 0, dimsWidth = Relative 0,
+                  dimsEndWidth = Relative 0, dimsEnding = mempty,
+                  dimsNesting = 0, dimsLines = 0,
+                  dimsBegin = mempty, dimsMin = 0 }
+
   mappend r1 r2
     | debug ("append\n  " ++ show r1 ++ "\n  " ++ show r2 ++ " =") False =
       undefined
-  mappend r1 @ Render { renderEnding = Newline }
-          r2 @ Render { renderBegin = Indent, renderNesting = nest2,
-                        renderMin = min2 }
+  mappend r1 @ Dims { dimsEnding = Newline }
+          r2 @ Dims { dimsBegin = Indent, dimsNesting = nest2,
+                      dimsMin = min2 }
     | nest2 > 0 =
       let
-        builder = const $! const $! const $! makespaces nest2
         newmin = max 0 (min2 - nest2)
-        spaces = Render { renderEnding = Normal, renderStartWidth = nest2,
-                          renderBegin = Indent, renderWidth = Relative nest2,
-                          renderLines = 0, renderBuilder = builder,
-                          renderNesting = 0, renderMin = 0,
-                          renderEndWidth = Relative nest2 }
+        spaces = Dims { dimsEnding = Normal, dimsStartWidth = nest2,
+                        dimsBegin = Indent, dimsWidth = Relative nest2,
+                        dimsLines = 0, dimsNesting = 0, dimsMin = 0,
+                        dimsEndWidth = Relative nest2 }
     in
-      r1 `mappend` spaces `mappend` r2 { renderNesting = 0, renderMin = newmin }
-  mappend Render { renderBuilder = build1, renderEnding = end1,
-                   renderBegin = begin1, renderNesting = nest1,
-                   renderLines = lines1, renderStartWidth = swidth1,
-                   renderWidth = width1, renderEndWidth = ewidth1,
-                   renderMin = min1 }
-          Render { renderBuilder = build2, renderEnding = end2,
-                   renderBegin = begin2, renderMin = min2,
-                   renderLines = lines2, renderStartWidth = swidth2,
-                   renderWidth = width2, renderEndWidth = ewidth2 } =
+      r1 `mappend` spaces `mappend` r2 { dimsNesting = 0, dimsMin = newmin }
+  mappend Dims { dimsEnding = end1, dimsBegin = begin1, dimsNesting = nest1,
+                 dimsLines = lines1, dimsStartWidth = swidth1,
+                 dimsWidth = width1, dimsEndWidth = ewidth1,
+                 dimsMin = min1 }
+          Dims { dimsEnding = end2, dimsBegin = begin2, dimsMin = min2,
+                 dimsLines = lines2, dimsStartWidth = swidth2,
+                 dimsWidth = width2, dimsEndWidth = ewidth2 } =
     let
-      newbuild = case (end1, begin2, ewidth1) of
-        -- We end with a newline, and begin with content.  Do
-        -- indentation.  Note that indentation for any nesting in
-        -- builder1 and builder2 will be handled internally.
-        (Newline, Indent, _) -> \sgr n c -> build1 sgr n c `mappend`
-                                            makespaces n `mappend`
-                                            build2 sgr n n
-        -- We end with something other than a newline, meaning we need
-        -- to calculate the column for the second builder.
-        --
-        -- For a fixed width, we set the column to the offset
-        (_, _, Fixed { fixedOffset = off }) ->
-          \sgr n c -> build1 sgr n c `mappend` build2 sgr n (n + off)
-        -- For a relative offset, we add the offset to the previous column.
-        (_, _, Relative { relOffset = off }) ->
-          \sgr n c -> build1 sgr n c `mappend` build2 sgr n (c + off)
-        -- For a maximum offset, we take the max.
-        (_, _, Maximum { maxFixed = fixed, maxRelative = rel }) ->
-          \sgr n c -> build1 sgr n c `mappend`
-                      build2 sgr n (max fixed (c + rel))
-
       -- The new begin and end states are from the monoid operations.
       newend = end1 `mappend` end2
       newbegin = begin1 `mappend` begin2
@@ -1407,11 +1379,83 @@ instance Monoid Render where
       newwidth = maxWidth (maxWidth newewidth midline)
                           (maxWidth width1 newwidth2)
 
-      out = Render { renderBuilder = newbuild, renderEnding = newend,
-                     renderBegin = newbegin, renderLines = lines1 + lines2,
-                     renderStartWidth = newswidth, renderWidth = newwidth,
-                     renderEndWidth = newewidth, renderNesting = nest1,
-                     renderMin = newmin }
+      out = Dims { dimsEnding = newend, dimsBegin = newbegin,
+                   dimsLines = lines1 + lines2, dimsStartWidth = newswidth,
+                   dimsWidth = newwidth, dimsEndWidth = newewidth,
+                   dimsNesting = nest1, dimsMin = newmin }
+    in
+      debug ("    " ++ show out ++ "\n\n") out
+
+-- | A rendering of a document.
+data Render =
+  Render {
+    -- | A builder that constructs the document.
+    renderBuilder :: !(Graphics -> Int -> Int -> Builder),
+    -- | Indentation mode for the next document.
+    renderDims :: !Dims
+  }
+
+instance Show Render where
+  show Render { renderBuilder = builder, renderDims = dims } =
+    "Render { renderDims = " ++ show dims ++
+    ", renderBuilder = " ++ show (toLazyByteString (builder Default 0 0)) ++
+    " }"
+
+instance Monoid Render where
+  mempty = Render { renderBuilder = const mempty, renderDims = mempty }
+
+  mappend r1 r2
+    | debug ("append\n  " ++ show r1 ++ "\n  " ++ show r2 ++ " =") False =
+      undefined
+  mappend r1 @ Render { renderDims = Dims { dimsEnding = Newline } }
+          r2 @ Render { renderDims = d2 @ Dims { dimsBegin = Indent,
+                                                 dimsNesting = nest2,
+                                                 dimsMin = min2 } }
+    | nest2 > 0 =
+      let
+        builder = const $! const $! const $! makespaces nest2
+        newmin = max 0 (min2 - nest2)
+        spaces = Render { renderDims = Dims { dimsEnding = Normal,
+                                              dimsStartWidth = nest2,
+                                              dimsBegin = Indent,
+                                              dimsWidth = Relative nest2,
+                                              dimsLines = 0, dimsMin = 0,
+                                              dimsNesting = 0,
+                                              dimsEndWidth = Relative nest2 },
+                          renderBuilder = builder }
+    in
+      r1 `mappend` spaces `mappend`
+      r2 { renderDims = d2 { dimsNesting = 0, dimsMin = newmin } }
+  mappend Render { renderDims = dims1 @ Dims { dimsEndWidth = ewidth1,
+                                               dimsEnding = end1 },
+                   renderBuilder = build1 }
+          Render { renderDims = dims2 @ Dims { dimsBegin = begin2 },
+                   renderBuilder = build2 } =
+    let
+      newbuild = case (end1, begin2, ewidth1) of
+        -- We end with a newline, and begin with content.  Do
+        -- indentation.  Note that indentation for any nesting in
+        -- builder1 and builder2 will be handled internally.
+        (Newline, Indent, _) -> \sgr n c -> build1 sgr n c `mappend`
+                                            makespaces n `mappend`
+                                            build2 sgr n n
+        -- We end with something other than a newline, meaning we need
+        -- to calculate the column for the second builder.
+        --
+        -- For a fixed width, we set the column to the offset
+        (_, _, Fixed { fixedOffset = off }) ->
+          \sgr n c -> build1 sgr n c `mappend` build2 sgr n (n + off)
+        -- For a relative offset, we add the offset to the previous column.
+        (_, _, Relative { relOffset = off }) ->
+          \sgr n c -> build1 sgr n c `mappend` build2 sgr n (c + off)
+        -- For a maximum offset, we take the max.
+        (_, _, Maximum { maxFixed = fixed, maxRelative = rel }) ->
+          \sgr n c -> build1 sgr n c `mappend`
+                      build2 sgr n (max fixed (c + rel))
+
+      newdims = dims1 `mappend` dims2
+
+      out = Render { renderBuilder = newbuild, renderDims = newdims }
     in
       debug ("    " ++ show out ++ "\n\n") out
 
@@ -1447,14 +1491,14 @@ subsumesWidth Maximum { maxRelative = rel1, maxFixed = fixed1 }
 subsumesWidth _ _ = False
 
 -- | Determine whether the first 'Render' is strictly better than the second.
-subsumes :: Render -> Render -> Bool
+subsumes :: Dims -> Dims -> Bool
 -- Simple comparisons: if the width is subsumed and the lines are less
-subsumes Render { renderWidth = width1, renderStartWidth = swidth1,
-                  renderLines = lines1, renderEndWidth = ewidth1,
-                  renderMin = min1 }
-         Render { renderWidth = width2, renderStartWidth = swidth2,
-                  renderLines = lines2, renderEndWidth = ewidth2,
-                  renderMin = min2 } =
+subsumes Dims { dimsWidth = width1, dimsStartWidth = swidth1,
+                dimsLines = lines1, dimsEndWidth = ewidth1,
+                dimsMin = min1 }
+         Dims { dimsWidth = width2, dimsStartWidth = swidth2,
+                dimsLines = lines2, dimsEndWidth = ewidth2,
+                dimsMin = min2 } =
   lines1 <= lines2 && swidth1 <= swidth2 && min1 <= min2 &&
   subsumesWidth width1 width2 && subsumesWidth ewidth1 ewidth2
 
@@ -1468,13 +1512,16 @@ newtype Frontier = Frontier { frontierRenders :: [Render] }
 -- nontrivial, due to the 3+-dimensional nature of subsumption, and
 -- the wierd interactions between the various kinds of column offsets.
 insertRender :: Frontier -> Render -> Frontier
-insertRender Frontier { frontierRenders = renders } ins
+insertRender Frontier { frontierRenders = renders }
+             ins @ Render { renderDims = dims }
     -- If the inserted element is subsumed by anything in the
     -- list, then don't insert it at all.
-  | any (`subsumes` ins) renders = Frontier { frontierRenders = renders }
+  | any (`subsumes` dims) (map renderDims renders) =
+    Frontier { frontierRenders = renders }
     -- Otherwise, add the element to the list, and drop everything it subsumes.
   | otherwise =
-    Frontier { frontierRenders = ins : filter (not . subsumes ins) renders }
+    Frontier { frontierRenders = ins : filter (not . subsumes dims . renderDims)
+                                              renders }
 
 instance Monoid Frontier where
   mempty = Frontier { frontierRenders = [] }
@@ -1569,10 +1616,10 @@ packResult Frontier { frontierRenders = opts }  =
 -- index), but handles Singles as well.
 mergeResults :: Result -> Result -> Result
 -- Single is equivalent to a single-entry HashMap
-mergeResults s1 @ Single { singleRender = r1 }
-             s2 @ Single { singleRender = r2 }
-  | subsumes r1 r2 = s1
-  | subsumes r2 r1 = s2
+mergeResults s1 @ Single { singleRender = r1 @ Render { renderDims = d1 } }
+             s2 @ Single { singleRender = r2 @ Render { renderDims = d2 } }
+  | subsumes d1 d2 = s1
+  | subsumes d2 d1 = s2
   | otherwise = Multi { multiOptions = Frontier { frontierRenders = [r1, r2] } }
 mergeResults Single { singleRender = render }
              Multi { multiOptions = opts } =
@@ -1616,42 +1663,42 @@ buildOptimal maxcol ansiterm doc =
     build Char { charContent = chr } =
       let
         builder = const $! const $! const $! fromChar chr
+        dims = Dims { dimsLines = 0, dimsStartWidth = 1,
+                      dimsWidth = Relative 1, dimsNesting = 0,
+                      dimsEndWidth = Relative 1, dimsMin = 0,
+                      dimsBegin = Indent, dimsEnding = Normal }
       in
         -- Single characters have a single possibility, a relative
         -- ending position one beyond the start, and an upper-bound
         -- one shorter than the maximum width.
-        Single { singleRender =
-                    Render { renderEnding = Normal, renderBuilder = builder,
-                             renderLines = 0, renderStartWidth = 1,
-                             renderWidth = Relative 1, renderNesting = 0,
-                             renderEndWidth = Relative 1, renderMin = 0,
-                             renderBegin = Indent } }
+        Single { singleRender = Render { renderBuilder = builder,
+                                         renderDims = dims } }
     build Content { contentString = txt, contentLength = len } =
       let
         builder = const $! const $! const $! fromLazyByteString txt
+        dims = Dims { dimsEnding = Normal, dimsStartWidth = len,
+                      dimsNesting = 0, dimsWidth = Relative len,
+                      dimsBegin = Indent, dimsLines = 0, dimsMin = 0,
+                      dimsEndWidth = Relative len }
       in
         -- Text has a single possibility and a relative ending position
         -- equal to its length
-       Single { singleRender =
-                    Render { renderEnding = Normal, renderBuilder = builder,
-                             renderStartWidth = len, renderNesting = 0,
-                             renderWidth = Relative len, renderBegin = Indent,
-                             renderLines = 0, renderMin = 0,
-                             renderEndWidth = Relative len } }
+       Single { singleRender = Render { renderBuilder = builder,
+                                        renderDims = dims } }
     build Line {} =
       let
         builder = const $! const $! const $! fromChar '\n'
+        dims = Dims { dimsLines = 1, dimsNesting = 0,
+                      dimsEnding = Newline, dimsBegin = None,
+                      dimsStartWidth = 0, dimsMin = 0,
+                      dimsWidth = Fixed 0, dimsEndWidth = Fixed 0 }
       in
         -- A newline starts at the nesting level, has no overrun, and an
         -- upper-bound equal to the maximum column width.
         --
         -- Note: the upper bound is adjusted elsewhere.
-        Single { singleRender =
-                    Render { renderLines = 1, renderNesting = 0,
-                             renderEnding = Newline, renderBegin = None,
-                             renderBuilder = builder, renderStartWidth = 0,
-                             renderMin = 0, renderWidth = Fixed 0,
-                             renderEndWidth = Fixed 0 } }
+        Single { singleRender = Render { renderBuilder = builder,
+                                         renderDims = dims } }
     -- This is for an empty cat, ie. the empty document
     build Cat { catDocs = [] } = mempty
     build Cat { catDocs = first : rest } =
@@ -1692,13 +1739,15 @@ buildOptimal maxcol ansiterm doc =
             else maximum (n + lvl) (rel + lvl)
 
         updateRender :: Render -> Render
-        updateRender r @ Render { renderBuilder = builder,
-                                  renderStartWidth = swidth,
-                                  renderMin = minwidth,
-                                  renderWidth = width,
-                                  renderNesting = nesting,
-                                  renderEndWidth = ewidth,
-                                  renderBegin = begin } =
+        updateRender r @ Render {
+                           renderBuilder = builder,
+                           renderDims = d @ Dims { dimsStartWidth = swidth,
+                                                   dimsMin = minwidth,
+                                                   dimsWidth = width,
+                                                   dimsNesting = nesting,
+                                                   dimsEndWidth = ewidth,
+                                                   dimsBegin = begin }
+                         } =
           let
             -- We add indentation if the rendering definitely needs it
             -- AND we're not delaying.  If we're delaying, then the
@@ -1738,9 +1787,12 @@ buildOptimal maxcol ansiterm doc =
               (False, False) -> (\sgr n c -> builder sgr (n + lvl) c,
                                  swidth, nesting + lvl, minwidth)
           in
-            r { renderBuilder = newbuilder, renderNesting = newnesting,
-                renderStartWidth = newswidth, renderWidth = nestWidth width,
-                renderEndWidth = nestWidth ewidth, renderMin = newmin }
+            r { renderBuilder = newbuilder,
+                renderDims = d { dimsNesting = newnesting,
+                                 dimsStartWidth = newswidth,
+                                 dimsWidth = nestWidth width,
+                                 dimsEndWidth = nestWidth ewidth,
+                                 dimsMin = newmin } }
 
         res = build inner
       in case res of
@@ -1793,8 +1845,10 @@ buildOptimal maxcol ansiterm doc =
           max 0 (max fixed rel - maxcol)
 
         -- | Compare two Renders.  Less than means better.
-        compareRenders Render { renderLines = lines1, renderWidth = width1 }
-                       Render { renderLines = lines2, renderWidth = width2 } =
+        compareRenders Render { renderDims = Dims { dimsLines = lines1,
+                                                    dimsWidth = width1 } }
+                       Render { renderDims = Dims { dimsLines = lines2,
+                                                    dimsWidth = width2 } } =
           case compare (overrun width1) (overrun width2) of
             EQ -> compare lines1 lines2
             out -> out
@@ -1855,9 +1909,6 @@ class Monad m => FormatM m item where
   -- | Format a list of @item@s as a 'Doc' inside an @m@ monad
   formatListM :: [item] -> m Doc
   formatListM = liftM list . mapM formatM
-
-instance Format a => Format [a] where
-  format = formatList
 
 instance Format Doc where
   format = id

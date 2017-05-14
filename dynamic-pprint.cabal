@@ -53,7 +53,8 @@ Library
   build-depends:        base >= 4.8 && < 5, Cabal >= 1.16.0, hashable, bytestring,
                         utf8-string, blaze-builder, ansi-terminal, unordered-containers
   exposed-modules:      Text.Format
-  other-modules:        Text.Format.Algorithms.Fast
+  other-modules:        Text.Format.Algorithms.Dynamic
+                        Text.Format.Algorithms.Fast
                         Text.Format.Algorithms.OneLine
                         Text.Format.Class
                         Text.Format.Doc

@@ -1,4 +1,4 @@
--- Copyright (c) 2014 Eric McCorkle.  All rights reserved.
+-- Copyright (c) 2017 Eric McCorkle.  All rights reserved.
 --
 -- Redistribution and use in source and binary forms, with or without
 -- modification, are permitted provided that the following conditions
@@ -28,11 +28,11 @@
 -- OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 -- SUCH DAMAGE.
 
-module Tests.Text(tests) where
+module UnitTest.Text.Format.Algorithms(tests) where
 
 import Test.HUnitPlus.Base
 
-import qualified Tests.Text.Format as Format
+import qualified UnitTest.Text.Format.Algorithms.Dynamic as Dynamic
 
 tests :: Test
-tests = "Text" ~: [Format.tests]
+tests = "Algorithms" ~: [Dynamic.tests]

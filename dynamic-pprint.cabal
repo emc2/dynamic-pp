@@ -45,6 +45,8 @@ Test-Suite UnitTest
                         HUnit-Plus, dynamic-pprint
   other-modules:        UnitTest.Text
                         UnitTest.Text.Format
+                        UnitTest.Text.Format.Algorithms
+                        UnitTest.Text.Format.Algorithms.Dynamic
 
 Library
   default-language:     Haskell2010
@@ -60,4 +62,3 @@ Library
                         Text.Format.Dims
                         Text.Format.Graphics
                         Text.Format.Render
-

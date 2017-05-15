@@ -31,6 +31,25 @@
 module PerfTest.Text.Format.Algorithms.Dynamic(tests) where
 
 import Criterion.Main
+import Text.Format
+
+nestLevel :: Int
+nestLevel = 2
+
+recordDoc :: [(Doc, Doc)]
+          -- ^ A list of @(field, value)@ bindings
+          -> Doc
+recordDoc binds =
+  let
+    softlines = map (\(field, val) -> field <+> equals </>
+                                      nest nestLevel val) binds
+    nosoftlines = map (\(field, val) -> field <+> equals <+> val) binds
+    nobreaks = hsep (punctuate comma nosoftlines)
+    alignbreaks = parens (align (vsep (punctuate comma softlines)))
+    nestbreaks = lparen <!> nest 2 (vsep (punctuate comma softlines)) <!> rparen
+  in case flatten nobreaks of
+    Just nolines -> choose [parens nolines, alignbreaks, nestbreaks]
+    Nothing -> choose [ alignbreaks, nestbreaks ]
 
 testlist :: [Benchmark]
 testlist = []

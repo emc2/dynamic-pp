@@ -38,10 +38,127 @@
 -- removed.
 module Text.Format(
        module Text.Format.Class,
-       module Text.Format.Doc,
        module Text.Format.Algorithms.Dynamic,
        module Text.Format.Algorithms.Fast,
        module Text.Format.Algorithms.OneLine,
+
+       -- * Basic Definitions
+       -- ** Types
+       Doc,
+       Graphics(..),
+
+              -- *** Basic
+       empty,
+       line,
+       linebreak,
+       hardline,
+       softline,
+       softbreak,
+
+       -- *** From datatypes
+       char,
+       string,
+       bytestring,
+       lazyBytestring,
+
+       -- *** Literals
+       lparen,
+       rparen,
+       lbrack,
+       rbrack,
+       lbrace,
+       rbrace,
+       langle,
+       rangle,
+       squote,
+       dquote,
+       backquote,
+       comma,
+       semi,
+       colon,
+       dot,
+       backslash,
+       equals,
+       space,
+
+       -- *** Derived
+       nest,
+       indent,
+       alignOffset,
+       align,
+       squoted,
+       dquoted,
+       parens,
+       brackets,
+       braces,
+       angles,
+       list,
+
+       -- *** Graphics Mode
+       graphics,
+       dullWhite,
+       dullRed,
+       dullYellow,
+       dullGreen,
+       dullBlue,
+       dullCyan,
+       dullMagenta,
+       dullBlack,
+       vividWhite,
+       vividRed,
+       vividYellow,
+       vividGreen,
+       vividBlue,
+       vividCyan,
+       vividMagenta,
+       vividBlack,
+       dullWhiteBackground,
+       dullRedBackground,
+       dullYellowBackground,
+       dullGreenBackground,
+       dullBlueBackground,
+       dullCyanBackground,
+       dullMagentaBackground,
+       dullBlackBackground,
+       vividWhiteBackground,
+       vividRedBackground,
+       vividYellowBackground,
+       vividGreenBackground,
+       vividBlueBackground,
+       vividCyanBackground,
+       vividMagentaBackground,
+       vividBlackBackground,
+
+       -- ** Combining @Doc@s
+
+       -- *** Basic
+       beside,
+       concat,
+       choose,
+
+       -- *** Derived
+       (<>),
+       (<+>),
+       (<!>),
+       (<$>),
+       (<$$>),
+       (</>),
+       (<//>),
+       hsep,
+       hcat,
+       vsep,
+       vcat,
+       sep,
+       cat,
+       fillSep,
+       fillCat,
+       enclose,
+       punctuate,
+       encloseSep,
+
+       -- ** Transforming @Doc@s
+       flatten,
+       group,
        ) where
 
 import Prelude hiding ((<$>), concat, maximum, minimum)

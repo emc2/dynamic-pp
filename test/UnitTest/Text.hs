@@ -1,4 +1,4 @@
--- Copyright (c) 2014 Eric McCorkle.  All rights reserved.
+-- Copyright (c) 2017 Eric McCorkle.  All rights reserved.
 --
 -- Redistribution and use in source and binary forms, with or without
 -- modification, are permitted provided that the following conditions
@@ -27,18 +27,12 @@
 -- OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 -- OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 -- SUCH DAMAGE.
-{-# LANGUAGE OverloadedStrings #-}
 
-module Main(main) where
+module UnitTest.Text(tests) where
 
-import Test.HUnitPlus
+import Test.HUnitPlus.Base
 
-import qualified UnitTest.Text as Text
+import qualified UnitTest.Text.Format as Format
 
-tests = [ Text.tests ]
-
-testsuite = TestSuite { suiteName = "UnitTest", suiteConcurrently = True,
-                        suiteTests = tests, suiteOptions = [] }
-
-main :: IO ()
-main = createMain [testsuite]
+tests :: Test
+tests = "Text" ~: [Format.tests]
